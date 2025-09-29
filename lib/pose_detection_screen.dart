@@ -6,8 +6,13 @@ import 'package:flutter/services.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'pose_classifier.dart';
+import 'exercise_selection_screen.dart';
 
 class PoseDetectionScreen extends StatefulWidget {
+  final ExerciseInfo? selectedExercise;
+  
+  const PoseDetectionScreen({Key? key, this.selectedExercise}) : super(key: key);
+  
   @override
   _PoseDetectionScreenState createState() => _PoseDetectionScreenState();
 }
@@ -22,6 +27,13 @@ class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
   double _confidence = 0.0;
   List<List<PoseLandmark>> _landmarkHistory = [];
   static const int maxHistoryLength = 30; // 최근 30프레임 저장
+  
+  // 훈련 상태 변수들
+  bool _isTraining = false;
+  int _correctCount = 0;
+  int _totalCount = 0;
+  double _accuracy = 0.0;
+  bool _isCorrect = false;
 
   final _orientations = {
     DeviceOrientation.portraitUp: 0,
@@ -181,26 +193,43 @@ class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
           _landmarkHistory.removeAt(0);
         }
         
-        // 운동 분류 수행 (모델이 로드된 경우에만)
+        // 운동 분류 수행 (훈련 중이거나 일반 인식 모드)
         String exercise = 'others';
         double confidence = 0.0;
+        bool isCorrect = false;
         
         if (_poseClassifier.isInitialized) {
           try {
-            exercise = _poseClassifier.classifyPose(landmarks);
-            confidence = exercise != 'others' ? 0.8 : 0.0;
+            // 신뢰도와 함께 분류 결과 받기
+            final result = _poseClassifier.classifyPoseWithConfidence(landmarks);
+            exercise = (result as Map<String, dynamic>)['exercise'] as String;
+            confidence = (result as Map<String, dynamic>)['confidence'] as double;
             
-            // 운동이 인식되었을 때 추가 로그
-            if (exercise != 'others') {
-              print('🎉 화면에 표시될 운동: $exercise');
+            // 디버깅 정보 출력
+            print('🔍 분류 결과: $exercise, 신뢰도: ${(confidence * 100).toStringAsFixed(1)}%');
+            
+            // 선택된 운동과 비교 (훈련 중일 때만)
+            if (_isTraining && widget.selectedExercise != null) {
+              print('🎯 선택된 운동: ${widget.selectedExercise!.id}');
+              
+              if (exercise == widget.selectedExercise!.id && confidence > 0.6) {
+                isCorrect = true;
+                _correctCount++;
+                print('✅ 올바른 운동 인식!');
+              } else if (exercise == widget.selectedExercise!.id && confidence <= 0.6) {
+                print('⚠️ 올바른 운동이지만 신뢰도 낮음: ${(confidence * 100).toStringAsFixed(1)}%');
+              } else {
+                print('❌ 잘못된 운동 인식: $exercise (선택: ${widget.selectedExercise!.id})');
+              }
+              
+              _totalCount++;
+              _accuracy = _totalCount > 0 ? (_correctCount / _totalCount) * 100 : 0.0;
             }
           } catch (e) {
             print('❌ 포즈 분류 오류: $e');
             exercise = 'others';
             confidence = 0.0;
           }
-        } else {
-          print('⏳ 모델 로딩 중...');
         }
         
         if (mounted) {
@@ -208,6 +237,7 @@ class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
             _poses = poses;
             _currentExercise = exercise;
             _confidence = confidence;
+            _isCorrect = isCorrect;
           });
         }
       } else {
@@ -290,17 +320,26 @@ class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
     }
 
     return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.selectedExercise != null ? '${widget.selectedExercise!.name} 훈련' : '실시간 인식'),
+        backgroundColor: Colors.black87,
+        foregroundColor: Colors.white,
+        centerTitle: true,
+      ),
       body: Stack(
         fit: StackFit.expand,
         children: [
           CameraPreview(_cameraController!),
-          CustomPaint(
-            painter: PosePainter(_poses, _cameraController!.value.previewSize!,
-                _cameraController!.description.lensDirection, poseClassifier: _poseClassifier),
-          ),
-          // 운동 분류 결과 표시
+          // 포즈 오버레이 (훈련 중일 때만 표시)
+          if (_isTraining)
+            CustomPaint(
+              painter: PosePainter(_poses, _cameraController!.value.previewSize!,
+                  _cameraController!.description.lensDirection, poseClassifier: _poseClassifier),
+            ),
+          
+          // 상단 정보 패널
           Positioned(
-            top: 50,
+            top: 20,
             left: 20,
             right: 20,
             child: Container(
@@ -309,63 +348,253 @@ class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
                 color: Colors.black.withOpacity(0.8),
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(
-                  color: _getExerciseColor(_currentExercise),
+                  color: widget.selectedExercise?.color ?? Colors.blue,
                   width: 2,
                 ),
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        _getExerciseIcon(_currentExercise),
-                        color: _getExerciseColor(_currentExercise),
-                        size: 24,
-                      ),
-                      SizedBox(width: 8),
-                      Text(
-                        '운동 분류 결과',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
+                  if (widget.selectedExercise != null) ...[
+                    // 선택된 운동 정보
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          _getExerciseIcon(widget.selectedExercise!.id),
+                          color: widget.selectedExercise!.color,
+                          size: 24,
                         ),
-                      ),
-                    ],
-                  ),
-                  SizedBox(height: 12),
-                  Container(
-                    padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: _getExerciseColor(_currentExercise).withOpacity(0.2),
-                      borderRadius: BorderRadius.circular(8),
+                        SizedBox(width: 8),
+                        Text(
+                          widget.selectedExercise!.name,
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
                     ),
-                    child: Text(
-                      _getExerciseDisplayName(_currentExercise),
+                    SizedBox(height: 8),
+                  ],
+                  
+                  // 훈련 상태 표시
+                  if (_isTraining) ...[
+                    Text(
+                      '훈련 진행 중',
                       style: TextStyle(
-                        color: _getExerciseColor(_currentExercise),
-                        fontSize: 28,
+                        color: Colors.green,
+                        fontSize: 16,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
-                  ),
-                  SizedBox(height: 8),
-                  Text(
-                    '신뢰도: ${(_confidence * 100).toStringAsFixed(1)}%',
-                    style: TextStyle(
-                      color: Colors.white70,
-                      fontSize: 14,
+                    SizedBox(height: 8),
+                    // 실시간 피드백
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          _isCorrect ? Icons.check_circle : Icons.cancel,
+                          color: _isCorrect ? Colors.green : Colors.red,
+                          size: 20,
+                        ),
+                        SizedBox(width: 8),
+                        Text(
+                          _isCorrect ? '올바른 자세!' : '자세를 확인해주세요',
+                          style: TextStyle(
+                            color: _isCorrect ? Colors.green : Colors.red,
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    SizedBox(height: 8),
+                    
+                    // 인식된 운동 결과 표시
+                    Container(
+                      padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: _getExerciseColor(_currentExercise).withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: _getExerciseColor(_currentExercise),
+                          width: 1,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            _getExerciseIcon(_currentExercise),
+                            color: _getExerciseColor(_currentExercise),
+                            size: 16,
+                          ),
+                          SizedBox(width: 8),
+                          Text(
+                            '인식: ${_getExerciseDisplayName(_currentExercise)}',
+                            style: TextStyle(
+                              color: _getExerciseColor(_currentExercise),
+                              fontSize: 14,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          SizedBox(width: 8),
+                          Text(
+                            '(${(_confidence * 100).toStringAsFixed(1)}%)',
+                            style: TextStyle(
+                              color: Colors.white70,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    SizedBox(height: 8),
+                    
+                    // 통계
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      children: [
+                        _buildStatItem('정확도', '${_accuracy.toStringAsFixed(1)}%', Colors.green),
+                        _buildStatItem('정답', '$_correctCount', Colors.green),
+                        _buildStatItem('전체', '$_totalCount', Colors.blue),
+                      ],
+                    ),
+                  ] else ...[
+                    Text(
+                      '시작 버튼을 눌러 훈련을 시작하세요',
+                      style: TextStyle(
+                        color: Colors.orange,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    SizedBox(height: 12),
+                    
+                    // 현재 인식 결과 (훈련 중이 아닐 때도 표시)
+                    if (_currentExercise != 'others')
+                      Container(
+                        padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: _getExerciseColor(_currentExercise).withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: _getExerciseColor(_currentExercise),
+                            width: 1,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              _getExerciseIcon(_currentExercise),
+                              color: _getExerciseColor(_currentExercise),
+                              size: 16,
+                            ),
+                            SizedBox(width: 8),
+                            Text(
+                              '현재 인식: ${_getExerciseDisplayName(_currentExercise)}',
+                              style: TextStyle(
+                                color: _getExerciseColor(_currentExercise),
+                                fontSize: 14,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            SizedBox(width: 8),
+                            Text(
+                              '(${(_confidence * 100).toStringAsFixed(1)}%)',
+                              style: TextStyle(
+                                color: Colors.white70,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    else
+                      Container(
+                        padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: Colors.grey.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: Colors.grey,
+                            width: 1,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.help_outline,
+                              color: Colors.grey,
+                              size: 16,
+                            ),
+                            SizedBox(width: 8),
+                            Text(
+                              '현재 인식: 기타',
+                              style: TextStyle(
+                                color: Colors.grey,
+                                fontSize: 14,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          
+          // 하단 컨트롤 버튼들
+          Positioned(
+            bottom: 20,
+            left: 20,
+            right: 20,
+            child: Container(
+              padding: EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.8),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  ElevatedButton.icon(
+                    onPressed: _isTraining ? _stopTraining : _startTraining,
+                    icon: Icon(_isTraining ? Icons.stop : Icons.play_arrow),
+                    label: Text(_isTraining ? '정지' : '시작'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _isTraining ? Colors.red : Colors.green,
+                      foregroundColor: Colors.white,
+                      padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                     ),
                   ),
-                  Text(
-                    '모델 상태: ${_poseClassifier.isInitialized ? "로드됨" : "로드 중..."}',
-                    style: TextStyle(
-                      color: _poseClassifier.isInitialized ? Colors.green : Colors.orange,
-                      fontSize: 12,
+                  ElevatedButton.icon(
+                    onPressed: _resetTrainingStats,
+                    icon: Icon(Icons.refresh),
+                    label: Text('리셋'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.orange,
+                      foregroundColor: Colors.white,
+                      padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                     ),
                   ),
+                  if (widget.selectedExercise == null)
+                    ElevatedButton.icon(
+                      onPressed: () => Navigator.pop(context),
+                      icon: Icon(Icons.arrow_back),
+                      label: Text('돌아가기'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.grey,
+                        foregroundColor: Colors.white,
+                        padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -375,39 +604,89 @@ class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
     );
   }
   
-  String _getExerciseDisplayName(String exercise) {
-    switch (exercise) {
-      case 'benchpress':
-        return 'benchpress';
-      case 'deadlift':
-        return 'deadlift';
-      case 'lunges':
-        return 'lunges';
-      case 'side_lateral_raise':
-        return 'side_lateral_raise';
-      case 'squat':
-        return 'squat';
-      default:
-        return 'others';
-    }
+  // 훈련 시작
+  void _startTraining() {
+    setState(() {
+      _isTraining = true;
+    });
   }
   
-  IconData _getExerciseIcon(String exercise) {
-    switch (exercise) {
+  // 훈련 정지
+  void _stopTraining() {
+    setState(() {
+      _isTraining = false;
+    });
+  }
+  
+  // 통계 리셋
+  void _resetTrainingStats() {
+    setState(() {
+      _correctCount = 0;
+      _totalCount = 0;
+      _accuracy = 0.0;
+      _isCorrect = false;
+      _currentExercise = 'others';
+      _confidence = 0.0;
+    });
+  }
+  
+  // 통계 아이템 위젯
+  Widget _buildStatItem(String label, String value, Color color) {
+    return Column(
+      children: [
+        Text(
+          value,
+          style: TextStyle(
+            color: color,
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        Text(
+          label,
+          style: TextStyle(
+            color: Colors.white70,
+            fontSize: 10,
+          ),
+        ),
+      ],
+    );
+  }
+  
+  IconData _getExerciseIcon(String exerciseId) {
+    switch (exerciseId) {
       case 'benchpress':
         return Icons.fitness_center;
       case 'deadlift':
-        return Icons.sports_gymnastics;
+        return Icons.trending_up;
       case 'lunges':
-        return Icons.directions_run;
+        return Icons.directions_walk;
       case 'side_lateral_raise':
-        return Icons.accessibility_new;
+        return Icons.arrow_upward;
       case 'squat':
-        return Icons.sports_handball;
+        return Icons.sports_gymnastics;
       default:
-        return Icons.help_outline;
+        return Icons.fitness_center;
     }
   }
+  
+  String _getExerciseDisplayName(String exercise) {
+    switch (exercise) {
+      case 'benchpress':
+        return '벤치프레스';
+      case 'deadlift':
+        return '데드리프트';
+      case 'lunges':
+        return '런지';
+      case 'side_lateral_raise':
+        return '사이드 레이즈';
+      case 'squat':
+        return '스쿼트';
+      default:
+        return '기타';
+    }
+  }
+  
   
   Color _getExerciseColor(String exercise) {
     switch (exercise) {
@@ -448,7 +727,6 @@ class PosePainter extends CustomPainter {
 
     for (final pose in poses) {
       final landmarks = pose.landmarks;
-      
       // NTU 25개 관절점 표시 (큰 원과 번호)
       if (poseClassifier != null && landmarks.isNotEmpty) {
         final landmarkList = landmarks.values.toList();
@@ -469,6 +747,7 @@ class PosePainter extends CustomPainter {
           }
           
           jointOffsets.add(finalOffset);
+
           
           canvas.drawCircle(finalOffset, 8, paintNtuCircle);
         }

@@ -61,7 +61,7 @@ flutter:
   # the material Icons class.
   uses-material-design: true
   assets:
-    - assets/models/msg3d_direct.tflite
+    - assets/models/ms_g3d_true_4d_optimized.tflite
 
   # To add assets to your application, add an assets section, like this:
   # assets:

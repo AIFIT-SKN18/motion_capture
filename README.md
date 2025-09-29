@@ -94,8 +94,3 @@ flutter run
 - 해상도를 `ResolutionPreset.medium`으로 설정
 - 프레임 히스토리 길이 조정
 - 신뢰도 임계값 조정
-
-## 라이선스
-
-이 프로젝트는 MIT 라이선스 하에 배포됩니다.
-

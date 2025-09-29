@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'dart:math' as math;
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 
@@ -16,11 +17,10 @@ class PoseClassifier {
     'others'         // 5
   ];
   
-  // 변환된 모델 입력 형태 (5D 입력: [1, 3, 64, 25, 1])
+  // 4D 모델 입력 형태 (4D 입력: [1, 64, 25, 3])
   static const int inputFrames = 64; // 프레임 수
   static const int numKeypoints = 25; // NTU RGB+D 데이터셋의 관절점 수
   static const int numChannels = 3; // x, y, confidence
-  static const int numDimensions = 1; // 차원 수
   
   // 포즈 히스토리 저장
   List<List<PoseLandmark>> _poseHistory = [];
@@ -30,8 +30,8 @@ class PoseClassifier {
   int _frameCount = 0;
   static const int classificationInterval = 3; // 3프레임마다 분류 수행 (1024×1024 입력 최적화)
   
-  // 변환된 모델은 5D 입력만 지원
-  static const bool _isInput5D = true;
+  // 4D 모델은 4D 입력을 지원
+  static const bool _isInput4D = true;
   
   // 실제 모델이 기대하는 입력 크기
   int _expectedInputSize = 4800; // 기본값
@@ -44,8 +44,8 @@ class PoseClassifier {
     try {
       print('🚀 PoseClassifier 초기화 시작...');
       
-      // TFLite 모델 로드
-      _interpreter = await Interpreter.fromAsset('assets/models/msg3d_direct.tflite');
+        // TFLite 모델 로드
+        _interpreter = await Interpreter.fromAsset('assets/models/ms_g3d_true_4d_optimized.tflite');
       
       // 모델 정보 출력
       print('✅ TFLite 모델 로드 성공!');
@@ -57,7 +57,7 @@ class PoseClassifier {
         print('  - 입력 텐서: ${input.name}, 형태: ${input.shape}');
         print('  - 데이터 타입: ${input.type}');
         print('  - 총 요소 수: ${input.shape.reduce((a, b) => a * b)}');
-        print('  - 변환된 모델 입력 형태: ${input.shape}');
+        print('  - 4D 모델 입력 형태: ${input.shape}');
         
         // 실제 모델이 기대하는 입력 크기 저장
         _expectedInputSize = input.shape.reduce((a, b) => a * b);
@@ -188,14 +188,14 @@ class PoseClassifier {
     
     // 변환된 모델용 간소화된 디버깅
     if (!_hasLoggedNtuStart) {
-      print('🔍 변환된 모델용 좌표 정규화 시작');
+      print('🔍 4D 모델용 좌표 정규화 시작');
       print('  - 중심점: ($centerX, $centerY)');
       print('  - 원본 MediaPipe 랜드마크 수: ${landmarks.length}');
       print('  - 변환된 NTU 관절점 수: ${joints.length}');
     }
     
-    // 변환된 모델에 맞는 좌표 정규화
-    double scaleFactor = 5.0; // 변환된 모델에 최적화된 스케일 팩터
+    // 4D 모델에 맞는 좌표 정규화
+    double scaleFactor = 5.0; // 4D 모델에 최적화된 스케일 팩터
     
     // 실제 모델 입력 형태에 맞게 데이터 구성
     // 각 채널별로 데이터 구성: 1차원 데이터 사용
@@ -210,7 +210,7 @@ class PoseClassifier {
           double normalizedX = (joints[i][0] - centerX) * scaleFactor;
           double normalizedY = (joints[i][1] - centerY) * scaleFactor;
           
-          // 값 범위 제한 (변환된 모델에 맞게 조정)
+          // 값 범위 제한 (4D 모델에 맞게 조정)
           normalizedX = normalizedX.clamp(-5.0, 5.0);
           normalizedY = normalizedY.clamp(-5.0, 5.0);
           
@@ -273,12 +273,33 @@ class PoseClassifier {
       int framesToUse = _poseHistory.length > inputFrames ? inputFrames : _poseHistory.length;
       List<List<PoseLandmark>> recentPoses = _poseHistory.sublist(_poseHistory.length - framesToUse);
       
-      // 5D 입력 모델 처리 ([1, 3, 64, 25, 1])
-      Float32List inputBuffer = _create5DInput(recentPoses);
+      // 4D 입력 모델 처리 ([1, 64, 25, 3])
+      Float32List inputBuffer = _create4DInput(recentPoses);
+      
+      // 입력 데이터 검증
+      if (inputBuffer.length != _expectedInputSize) {
+        print('❌ 입력 크기 불일치: 예상=${_expectedInputSize}, 실제=${inputBuffer.length}');
+        return 'others';
+      }
+      
+      // NaN 또는 무한값 검사
+      bool hasInvalidValue = false;
+      for (int i = 0; i < inputBuffer.length; i++) {
+        if (inputBuffer[i].isNaN || inputBuffer[i].isInfinite) {
+          hasInvalidValue = true;
+          break;
+        }
+      }
+      
+      if (hasInvalidValue) {
+        print('❌ 입력 데이터에 유효하지 않은 값이 포함됨');
+        return 'others';
+      }
       
       // 성능 모니터링 (간소화)
       if (_frameCount % 30 == 0) { // 30프레임마다 한 번씩만 출력
         print('📊 실시간 분류 상태: 프레임=${_poseHistory.length}, 사용=${framesToUse}, 입력크기=${inputBuffer.length}');
+        print('📊 입력 데이터 범위: ${inputBuffer.reduce((a, b) => a < b ? a : b)} ~ ${inputBuffer.reduce((a, b) => a > b ? a : b)}');
       }
       
       // 출력 버퍼 준비
@@ -286,30 +307,54 @@ class PoseClassifier {
       
       // 모델 추론 실행
       try {
-        _interpreter.run(inputBuffer, output);
-      } catch (e) {
-        print('❌ 모델 추론 실행 오류: $e');
-        print('❌ 입력 버퍼 크기: ${inputBuffer.length}');
-        print('❌ 출력 버퍼 크기: ${output.length}x${output[0].length}');
-        return 'others';
+        // 1차원 배열을 4D 배열로 변환하여 시도
+        List<List<List<List<double>>>> reshapedInput = _reshapeTo4D(inputBuffer);
+        _interpreter.run(reshapedInput, output);
+        print('✅ 모델 추론 성공 (4D 배열)');
+      } catch (e1) {
+        print('⚠️ 4D 배열 실행 실패, 1D 배열로 재시도: $e1');
+        try {
+          _interpreter.run(inputBuffer, output);
+          print('✅ 모델 추론 성공 (1D 배열)');
+        } catch (e2) {
+          print('❌ 모델 추론 실행 오류 (1D): $e2');
+          print('❌ 입력 버퍼 크기: ${inputBuffer.length}');
+          print('❌ 출력 버퍼 크기: ${output.length}x${output[0].length}');
+          print('❌ 예상 입력 크기: $_expectedInputSize');
+          return 'others';
+        }
       }
       
-      // 가장 높은 확률의 클래스 반환
-      int predictedClass = 0;
-      double maxProbability = output[0][0];
+      // 소프트맥스 함수 적용 (원시 로짓을 확률로 변환)
+      List<double> probabilities = _applySoftmax(output[0]);
       
       // 가장 높은 확률의 클래스 찾기
-      for (int i = 0; i < exerciseClasses.length; i++) {
-        if (output[0][i] > maxProbability) {
-          maxProbability = output[0][i];
+      int predictedClass = 0;
+      double maxProbability = probabilities[0];
+      
+      for (int i = 0; i < probabilities.length; i++) {
+        if (probabilities[i] > maxProbability) {
+          maxProbability = probabilities[i];
           predictedClass = i;
         }
       }
       
       String predictedExercise = exerciseClasses[predictedClass];
       
-      // 신뢰도가 낮으면 'others' 반환 (변환된 모델에 맞게 조정)
-      if (maxProbability < 0.4) {
+      // 상세한 분류 결과 출력 (원시값과 확률 모두)
+      print('🎯 원시 로짓 값:');
+      for (int i = 0; i < exerciseClasses.length; i++) {
+        print('  - ${exerciseClasses[i]}: ${output[0][i].toStringAsFixed(3)}');
+      }
+      print('🎯 소프트맥스 적용 후:');
+      for (int i = 0; i < exerciseClasses.length; i++) {
+        print('  - ${exerciseClasses[i]}: ${(probabilities[i] * 100).toStringAsFixed(1)}%');
+      }
+      print('🎯 최종 분류 결과: $predictedExercise (${(maxProbability * 100).toStringAsFixed(1)}%)');
+      
+      // 신뢰도가 낮으면 'others' 반환 (적절한 임계값 적용)
+      if (maxProbability < 0.3) {
+        print('📊 신뢰도 낮음: ${(maxProbability * 100).toStringAsFixed(1)}% -> others 반환');
         return 'others';
       }
       
@@ -338,7 +383,7 @@ class PoseClassifier {
       }
       
       // 최소 프레임 수 확인 (실시간 성능 최적화)
-      int minFrames = 5; // 변환된 모델은 최소 5프레임으로 충분
+      int minFrames = 5; // 4D 모델은 최소 5프레임으로 충분
       if (_poseHistory.length < minFrames) {
         return {'exercise': 'others', 'confidence': 0.0};
       }
@@ -347,12 +392,33 @@ class PoseClassifier {
       int framesToUse = _poseHistory.length > inputFrames ? inputFrames : _poseHistory.length;
       List<List<PoseLandmark>> recentPoses = _poseHistory.sublist(_poseHistory.length - framesToUse);
       
-      // 5D 입력 모델 처리 ([1, 3, 64, 25, 1])
-      Float32List inputBuffer = _create5DInput(recentPoses);
+      // 4D 입력 모델 처리 ([1, 64, 25, 3])
+      Float32List inputBuffer = _create4DInput(recentPoses);
+      
+      // 입력 데이터 검증
+      if (inputBuffer.length != _expectedInputSize) {
+        print('❌ 입력 크기 불일치: 예상=${_expectedInputSize}, 실제=${inputBuffer.length}');
+        return {'exercise': 'others', 'confidence': 0.0};
+      }
+      
+      // NaN 또는 무한값 검사
+      bool hasInvalidValue = false;
+      for (int i = 0; i < inputBuffer.length; i++) {
+        if (inputBuffer[i].isNaN || inputBuffer[i].isInfinite) {
+          hasInvalidValue = true;
+          break;
+        }
+      }
+      
+      if (hasInvalidValue) {
+        print('❌ 입력 데이터에 유효하지 않은 값이 포함됨');
+        return {'exercise': 'others', 'confidence': 0.0};
+      }
       
       // 성능 모니터링 (간소화)
       if (_frameCount % 30 == 0) { // 30프레임마다 한 번씩만 출력
         print('📊 실시간 분류 상태: 프레임=${_poseHistory.length}, 사용=${framesToUse}, 입력크기=${inputBuffer.length}');
+        print('📊 입력 데이터 범위: ${inputBuffer.reduce((a, b) => a < b ? a : b)} ~ ${inputBuffer.reduce((a, b) => a > b ? a : b)}');
       }
       
       // 출력 버퍼 준비
@@ -360,30 +426,43 @@ class PoseClassifier {
       
       // 모델 추론 실행
       try {
-        _interpreter.run(inputBuffer, output);
-      } catch (e) {
-        print('❌ 모델 추론 실행 오류: $e');
-        print('❌ 입력 버퍼 크기: ${inputBuffer.length}');
-        print('❌ 출력 버퍼 크기: ${output.length}x${output[0].length}');
-        return {'exercise': 'others', 'confidence': 0.0};
+        // 1차원 배열을 4D 배열로 변환하여 시도
+        List<List<List<List<double>>>> reshapedInput = _reshapeTo4D(inputBuffer);
+        _interpreter.run(reshapedInput, output);
+        print('✅ 모델 추론 성공 (4D 배열)');
+      } catch (e1) {
+        print('⚠️ 4D 배열 실행 실패, 1D 배열로 재시도: $e1');
+        try {
+          _interpreter.run(inputBuffer, output);
+          print('✅ 모델 추론 성공 (1D 배열)');
+        } catch (e2) {
+          print('❌ 모델 추론 실행 오류 (1D): $e2');
+          print('❌ 입력 버퍼 크기: ${inputBuffer.length}');
+          print('❌ 출력 버퍼 크기: ${output.length}x${output[0].length}');
+          print('❌ 예상 입력 크기: $_expectedInputSize');
+          return {'exercise': 'others', 'confidence': 0.0};
+        }
       }
       
-      // 가장 높은 확률의 클래스 반환
-      int predictedClass = 0;
-      double maxProbability = output[0][0];
+      // 소프트맥스 함수 적용 (원시 로짓을 확률로 변환)
+      List<double> probabilities = _applySoftmax(output[0]);
       
       // 가장 높은 확률의 클래스 찾기
-      for (int i = 0; i < exerciseClasses.length; i++) {
-        if (output[0][i] > maxProbability) {
-          maxProbability = output[0][i];
+      int predictedClass = 0;
+      double maxProbability = probabilities[0];
+      
+      for (int i = 0; i < probabilities.length; i++) {
+        if (probabilities[i] > maxProbability) {
+          maxProbability = probabilities[i];
           predictedClass = i;
         }
       }
       
       String predictedExercise = exerciseClasses[predictedClass];
       
-      // 신뢰도가 낮으면 'others' 반환 (변환된 모델에 맞게 조정)
-      if (maxProbability < 0.4) {
+      // 신뢰도가 낮으면 'others' 반환 (적절한 임계값 적용)
+      if (maxProbability < 0.3) {
+        print('📊 신뢰도 낮음: ${(maxProbability * 100).toStringAsFixed(1)}% -> others 반환');
         return {'exercise': 'others', 'confidence': maxProbability};
       }
       
@@ -395,13 +474,12 @@ class PoseClassifier {
     }
   }
   
-  // 변환된 모델용 입력 생성 (모델이 기대하는 크기에 맞춤)
-  Float32List _create5DInput(List<List<PoseLandmark>> recentPoses) {
+  // 4D 모델용 입력 생성 [1, 64, 25, 3]
+  Float32List _create4DInput(List<List<PoseLandmark>> recentPoses) {
     List<double> flatInput = [];
     
-    // 입력 시퀀스 생성
-    List<List<List<List<double>>>> inputSequence = [];
-    
+    // 4D 입력 생성: [batch, time, keypoints, channels]
+    // batch=1, time=64, keypoints=25, channels=3
     for (int t = 0; t < inputFrames; t++) {
       List<List<List<double>>> frameData;
       
@@ -412,72 +490,93 @@ class PoseClassifier {
         frameData = _preprocessPoseData(recentPoses.last);
       }
       
-      inputSequence.add(frameData);
-    }
-    
-    // 기본 5D 입력 생성 (4800 요소)
-    for (int c = 0; c < numChannels; c++) {
-      for (int t = 0; t < inputFrames; t++) {
-        for (int k = 0; k < numKeypoints; k++) {
-          // 안전한 데이터 접근
+      // 각 관절점에 대해 3채널 데이터 추가
+      for (int k = 0; k < numKeypoints; k++) {
+        for (int c = 0; c < numChannels; c++) {
           double value = 0.0;
-          if (t < inputSequence.length && 
-              c < inputSequence[t].length && 
-              k < inputSequence[t][c].length && 
-              inputSequence[t][c][k].isNotEmpty) {
-            value = inputSequence[t][c][k][0];
+          if (c < frameData.length && 
+              k < frameData[c].length && 
+              frameData[c][k].isNotEmpty) {
+            value = frameData[c][k][0];
           }
           flatInput.add(value);
         }
       }
     }
     
-    // 모델이 기대하는 크기로 조정
-    if (_expectedInputSize == 1048576) { // 1024 × 1024
-      // 1024 × 1024 크기로 확장
-      List<double> expandedInput = [];
-      for (int i = 0; i < 1024; i++) {
-        for (int j = 0; j < 1024; j++) {
-          if (i < flatInput.length) {
-            expandedInput.add(flatInput[i]);
-          } else {
-            expandedInput.add(0.0);
-          }
-        }
+    // 예상 입력 크기: 1 × 64 × 25 × 3 = 4800
+    int expectedSize = inputFrames * numKeypoints * numChannels;
+    
+    if (flatInput.length != expectedSize) {
+      print('⚠️ 4D 입력 크기 조정: 예상=$expectedSize, 실제=${flatInput.length}');
+      // 크기 맞춤
+      if (flatInput.length < expectedSize) {
+        // 부족한 부분은 0으로 패딩
+        flatInput.addAll(List.filled(expectedSize - flatInput.length, 0.0));
+      } else {
+        // 초과하는 부분은 잘라냄
+        flatInput = flatInput.sublist(0, expectedSize);
       }
-      print('✅ 1024×1024 입력 생성: ${expandedInput.length} 요소');
-      return Float32List.fromList(expandedInput);
-    } else if (_expectedInputSize == 23040000) { // 4800 × 4800
-      // 23040000 = 4800 × 4800 크기로 확장 (비효율적이지만 모델 요구사항 충족)
-      List<double> expandedInput = [];
-      for (int i = 0; i < 4800; i++) {
-        for (int j = 0; j < 4800; j++) {
-          if (i < flatInput.length) {
-            expandedInput.add(flatInput[i]);
-          } else {
-            expandedInput.add(0.0);
-          }
-        }
-      }
-      print('⚠️ 대용량 입력 생성: ${expandedInput.length} 요소 (성능 저하 가능)');
-      return Float32List.fromList(expandedInput);
-    } else if (_expectedInputSize == 4800) {
-      // 기본 크기 (4800) 사용
-      return Float32List.fromList(flatInput);
-    } else {
-      // 알 수 없는 크기 - 패딩으로 맞춤
-      List<double> paddedInput = List.filled(_expectedInputSize, 0.0);
-      for (int i = 0; i < flatInput.length && i < _expectedInputSize; i++) {
-        paddedInput[i] = flatInput[i];
-      }
-      print('⚠️ 패딩된 입력 생성: ${paddedInput.length} 요소');
-      return Float32List.fromList(paddedInput);
     }
+    
+    print('✅ 4D 입력 생성: ${flatInput.length} 요소 [1, 64, 25, 3]');
+    return Float32List.fromList(flatInput);
+  }
+
+  // 1차원 배열을 4D 배열로 변환 [1, 64, 25, 3]
+  List<List<List<List<double>>>> _reshapeTo4D(Float32List flatInput) {
+    List<List<List<List<double>>>> result = [];
+    int index = 0;
+    
+    for (int b = 0; b < 1; b++) {
+      List<List<List<double>>> batch = [];
+      
+      for (int t = 0; t < inputFrames; t++) {
+        List<List<double>> frame = [];
+        
+        for (int k = 0; k < numKeypoints; k++) {
+          List<double> keypoint = [];
+          
+          for (int c = 0; c < numChannels; c++) {
+            if (index < flatInput.length) {
+              keypoint.add(flatInput[index].toDouble());
+            } else {
+              keypoint.add(0.0);
+            }
+            index++;
+          }
+          frame.add(keypoint);
+        }
+        batch.add(frame);
+      }
+      result.add(batch);
+    }
+    
+    print('✅ 입력 데이터를 4D 형태로 변환: [1, 64, 25, 3]');
+    return result;
   }
 
   // NTU 관절점을 외부에서 접근할 수 있도록 제공
   List<List<double>> getNtuJoints(List<PoseLandmark> landmarks) {
     return _mediapipeToNtu(landmarks);
+  }
+  
+  // 소프트맥스 함수 적용 (원시 로짓을 확률로 변환)
+  List<double> _applySoftmax(List<double> logits) {
+    // 수치 안정성을 위해 최대값을 빼기
+    double maxLogit = logits.reduce((a, b) => a > b ? a : b);
+    List<double> shiftedLogits = logits.map((x) => x - maxLogit).toList();
+    
+    // 지수 함수 적용
+    List<double> exponentials = shiftedLogits.map((x) => math.exp(x)).toList();
+    
+    // 합계 계산
+    double sum = exponentials.reduce((a, b) => a + b);
+    
+    // 정규화 (확률로 변환)
+    List<double> probabilities = exponentials.map((x) => x / sum).toList();
+    
+    return probabilities;
   }
   
   // 시퀀스 기반 분류 (호환성을 위해 유지)
