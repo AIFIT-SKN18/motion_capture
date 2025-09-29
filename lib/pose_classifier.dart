@@ -45,7 +45,7 @@ class PoseClassifier {
       print('🚀 PoseClassifier 초기화 시작...');
       
         // TFLite 모델 로드
-        _interpreter = await Interpreter.fromAsset('assets/models/ms_g3d_true_4d_optimized.tflite');
+        _interpreter = await Interpreter.fromAsset('assets/models/ctvm_4d_model_fixed.tflite');
       
       // 모델 정보 출력
       print('✅ TFLite 모델 로드 성공!');

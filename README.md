@@ -24,9 +24,7 @@ MS-G3D 모델을 사용한 실시간 운동 자세 분류 Flutter 앱입니다.
 ### 1. 모델 파일 준비
 
 ```bash
-# android/assets/models/msg3d_direct.tflite 파일을 
-# assets/models/msg3d_direct.tflite로 복사
-cp android/assets/models/msg3d_direct.tflite assets/models/msg3d_direct.tflite
+
 ```
 
 ### 2. 의존성 설치
