@@ -1,0 +1,13 @@
+Epoch 001 | train loss 0.6949 acc 0.7240 f1 0.7240 || valid loss 0.1958 acc 0.8411 f1 0.8411 | OTHER_GATE top1_min=0.8
+Epoch 002 | train loss 0.1142 acc 0.9180 f1 0.9180 || valid loss 0.0613 acc 0.9740 f1 0.9740 | OTHER_GATE top1_min=0.8
+Epoch 003 | train loss 0.0304 acc 0.9792 f1 0.9792 || valid loss 0.0377 acc 0.9661 f1 0.9661 | OTHER_GATE top1_min=0.8
+Epoch 004 | train loss 0.0228 acc 0.9844 f1 0.9844 || valid loss 0.0121 acc 0.9922 f1 0.9922 | OTHER_GATE top1_min=0.8
+Epoch 005 | train loss 0.0126 acc 0.9935 f1 0.9935 || valid loss 0.0110 acc 0.9870 f1 0.9870 | OTHER_GATE top1_min=0.8
+Epoch 006 | train loss 0.0050 acc 0.9987 f1 0.9987 || valid loss 0.0030 acc 1.0000 f1 1.0000 | OTHER_GATE top1_min=0.8
+Epoch 007 | train loss 0.0024 acc 1.0000 f1 1.0000 || valid loss 0.0028 acc 1.0000 f1 1.0000 | OTHER_GATE top1_min=0.8
+Epoch 008 | train loss 0.0018 acc 1.0000 f1 1.0000 || valid loss 0.0024 acc 1.0000 f1 1.0000 | OTHER_GATE top1_min=0.8
+Epoch 009 | train loss 0.0018 acc 1.0000 f1 1.0000 || valid loss 0.0025 acc 1.0000 f1 1.0000 | OTHER_GATE top1_min=0.8
+Epoch 010 | train loss 0.0019 acc 1.0000 f1 1.0000 || valid loss 0.0025 acc 1.0000 f1 1.0000 | OTHER_GATE top1_min=0.8
+Epoch 011 | train loss 0.0020 acc 1.0000 f1 1.0000 || valid loss 0.0028 acc 1.0000 f1 1.0000 | OTHER_GATE top1_min=0.8
+Epoch 012 | train loss 0.0021 acc 1.0000 f1 1.0000 || valid loss 0.0029 acc 1.0000 f1 1.0000 | OTHER_GATE top1_min=0.8
+Epoch 013 | train loss 0.0022 acc 1.0000 f1 1.0000 || valid loss 0.0030 acc 1.0000 f1 1.0000 | OTHER_GATE top1_min=0.8

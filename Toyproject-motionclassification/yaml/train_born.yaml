@@ -1,0 +1,44 @@
+work_dir: /content/drive/MyDrive/fine-tuning_outdir/agcn_bone/0925-1
+model_saved_name: /content/drive/MyDrive/fine-tuning_outdir/agcn_bone/0925-1/runs
+
+# 기존 NPY 기반 feeder (폴더 모드 쓸 땐 CLI로 override)
+feeder: feeders.feeder.Feeder
+train_feeder_args:
+  data_path: /content/drive/MyDrive/fine-tuning/train/bone/train_data_bone.npy
+  label_path: /content/drive/MyDrive/fine-tuning/train/bone/train_label.pkl
+  debug: False
+  random_choose: False
+  random_shift: False
+  random_move: False
+  window_size: 300
+  normalization: True
+
+# ===== 폴더 로딩 메모(실행은 CLI에서 켜기) =====
+folder_feeder:
+  data_dir: "/content/drive/MyDrive/fine-tuning/train/bone"  # bone npy 폴더
+  pattern: "*_bone.npy"               # bone 파일 패턴
+  label_from: "sidecar"               # 옆의 *_label.pkl 사용
+  master_label_path: null
+  folder_window_size: 300
+
+model: model.agcn.Model
+model_args:
+  num_class: 6
+  in_channels: 3          # bone은 C=3
+  num_point: 25
+  num_person: 2
+  graph: graph.ntu_rgb_d.Graph
+  graph_args:
+    labeling_mode: 'spatial'
+
+apply_other_gate: 1
+other_top1_min: 0.8
+weight_decay: 0.0001
+base_lr: 0.05
+step: [10, 15]
+
+device: [0]
+batch_size: 32
+test_batch_size: 32
+num_epoch: 20
+nesterov: True

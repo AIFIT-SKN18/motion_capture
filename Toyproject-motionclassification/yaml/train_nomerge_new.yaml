@@ -1,0 +1,44 @@
+work_dir: /content/drive/MyDrive/motion seungok/fine-tuning_new_0921/work_dir/ntu/xsub/agcn_joint
+model_saved_name: /content/drive/MyDrive/motion seungok/fine-tuning_new_0921/runs/ntu_cs_agcn_joint
+
+# 기존 NPY 기반 feeder (폴더 모드 쓸 땐 CLI로 override)
+feeder: feeders.feeder.Feeder
+train_feeder_args:
+  data_path: /content/drive/MyDrive/motion seungok/fine-tuning_dataset/final_dataset_new/train_data_joint.npy
+  label_path: /content/drive/MyDrive/motion seungok/fine-tuning_dataset/final_dataset_new/train_label.pkl
+  debug: False
+  random_choose: False
+  random_shift: False
+  random_move: False
+  window_size: 300
+  normalization: True
+
+# ===== 폴더 로딩 메모(실행은 CLI에서 켜기) =====
+folder_feeder:
+  data_dir: "/content/drive/MyDrive/motion seungok/fine-tuning_dataset/final_dataset_new/train"  # 폴더 경로
+  pattern: "*_data_joint.npy"      # 파일명이 제각각이어도 이 패턴만 맞으면 됨
+  label_from: "sidecar"            # 옆의 *_label.pkl 사용
+  master_label_path: null          # sidecar면 필요 없음
+  folder_window_size: 300          # 훈련/추론 동일 권장
+
+model: model.agcn.Model
+model_args:
+  num_class: 6
+  in_channels: 3  
+  num_point: 25
+  num_person: 2
+  graph: graph.ntu_rgb_d.Graph
+  graph_args:
+    labeling_mode: 'spatial'
+
+apply_other_gate: 1       # ← 추가
+other_top1_min: 0.8       # ← 추가
+weight_decay: 0.0001
+base_lr: 0.05
+step: [10, 15]
+
+device: [0]
+batch_size: 32
+test_batch_size: 32
+num_epoch: 20
+nesterov: True

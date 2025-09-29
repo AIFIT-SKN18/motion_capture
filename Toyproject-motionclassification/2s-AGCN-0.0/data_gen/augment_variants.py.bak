@@ -1,0 +1,146 @@
+
+import os, argparse, pickle, numpy as np, sys
+
+# skeleton_aug import 경로 보정
+try:
+try:
+    from data_gen.skeleton_aug import (
+        Compose, RandomTimeCropPad, RandomRotateXYZ, RandomScale, RandomTranslateXY, RandomFlipLR
+    )
+except ModuleNotFoundError:
+    from .skeleton_aug import (
+        Compose, RandomTimeCropPad, RandomRotateXYZ, RandomScale, RandomTranslateXY, RandomFlipLR
+    )
+
+except Exception:
+    HERE = os.path.dirname(__file__)
+    PARENT = os.path.abspath(os.path.join(HERE, ".."))
+    if PARENT not in sys.path: sys.path.insert(0, PARENT)
+    if "/mnt/data" not in sys.path: sys.path.append("/mnt/data")
+    from skeleton_aug import Compose, RandomTimeCropPad, RandomRotateXYZ, RandomScale, RandomTranslateXY, RandomFlipLR
+
+# NTU25 좌/우 스왑 페어(0-based)
+SWAP_PAIRS_NTU25 = [
+    (4, 8), (5, 9), (6,10), (7,11),
+    (12,16), (13,17), (14,18), (15,19),
+    (21,23), (22,24),
+]
+
+def build_pipeline(T=300, yaw=0.0, pitch=0.0, roll=0.0, flip_p=0.0, dataset_key="ntu/xsub"):
+    ops = [RandomTimeCropPad(T=T)]
+    ops.append(RandomRotateXYZ(yaw_deg=abs(yaw), pitch_deg=abs(pitch), roll_deg=abs(roll)))
+    ops.append(RandomScale(smin=1.0, smax=1.0))          # scale/translate는 off
+    ops.append(RandomTranslateXY(max_shift=0.0))
+    swap_pairs = SWAP_PAIRS_NTU25 if dataset_key.startswith("ntu") else ()
+    ops.append(RandomFlipLR(swap_pairs, p=flip_p))       # 좌우 플립만 사용
+    return Compose(ops)
+
+def variant_specs(default_deg):
+    yaw = float(default_deg.get("yaw", 15.0))
+    pit = float(default_deg.get("pitch", 8.0))
+    rol = float(default_deg.get("roll", 8.0))
+    return {
+        "yaw":        dict(yaw=yaw,  pitch=0.0,  roll=0.0,  flip_p=0.0),
+        "pitch":      dict(yaw=0.0,  pitch=pit,  roll=0.0,  flip_p=0.0),
+        "roll":       dict(yaw=0.0,  pitch=0.0,  roll=rol,  flip_p=0.0),
+        "flip":       dict(yaw=0.0,  pitch=0.0,  roll=0.0,  flip_p=1.0),
+        "yaw+flip":   dict(yaw=yaw,  pitch=0.0,  roll=0.0,  flip_p=1.0),
+        "pitch+flip": dict(yaw=0.0,  pitch=pit,  roll=0.0,  flip_p=1.0),
+        "roll+flip":  dict(yaw=0.0,  pitch=0.0,  roll=rol,  flip_p=1.0),
+        "ypr":        dict(yaw=yaw,  pitch=pit,  roll=rol,  flip_p=0.0),
+        "ypr+flip":   dict(yaw=yaw,  pitch=pit,  roll=rol,  flip_p=1.0),
+    }
+
+def load_label_pkl(path):
+    if not path or not os.path.isfile(path):
+        return None
+    with open(path, "rb") as f:
+        try:
+            return pickle.load(f)
+        except Exception:
+            return None
+
+def replicate_labels(L, times):
+    if L is None: 
+        return None
+    # dict 포맷 유지
+    if isinstance(L, dict):
+        out = dict(L)
+        if "label_index" in L and isinstance(L["label_index"], list):
+            out["label_index"] = L["label_index"] * times
+        if "label" in L and isinstance(L.get("label"), list):
+            out["label"] = L["label"] * times
+        return out
+    # (names, label_index) 튜플
+    if isinstance(L, tuple) and len(L)==2:
+        names, label_index = L
+        names = names * times if isinstance(names, list) else names
+        label_index = label_index * times if isinstance(label_index, list) else label_index
+        return (names, label_index)
+    # 리스트/스칼라 등은 그대로 반복
+    try:
+        return L * times
+    except Exception:
+        return L
+
+def main():
+    ap = argparse.ArgumentParser(description="Generate per-augmentation skeleton datasets (JOINT ONLY).")
+    ap.add_argument("--in_joint", required=True, help="Path to *_data_joint.npy (N,C,T,V,M)")
+    ap.add_argument("--in_label", default=None, help="Optional label pkl to replicate")
+    ap.add_argument("--out_dir", required=True)
+    ap.add_argument("--dataset", default="ntu/xsub", choices=["ntu/xsub","ntu/xview","kinetics"])
+    ap.add_argument("--T", type=int, default=300)
+    ap.add_argument("--copies", type=int, default=1, help="Augmented copies per variant per sample")
+    ap.add_argument("--variants", default="all", help="Comma-separated (yaw,pitch,roll,flip,yaw+flip,pitch+flip,roll+flip,ypr,ypr+flip) or 'all'")
+    ap.add_argument("--yaw_deg", type=float, default=15.0)
+    ap.add_argument("--pitch_deg", type=float, default=8.0)
+    ap.add_argument("--roll_deg", type=float, default=8.0)
+    args = ap.parse_args()
+
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    X = np.load(args.in_joint)  # (N,C,T,V,M)
+    if X.ndim != 5: 
+        raise ValueError("Expected input shape (N,C,T,V,M)")
+    N,C,T,V,M = X.shape
+    print(f"Loaded: {args.in_joint} -> {X.shape}  dataset={args.dataset}")
+
+    lbl = load_label_pkl(args.in_label)
+
+    all_specs = variant_specs({"yaw":args.yaw_deg,"pitch":args.pitch_deg,"roll":args.roll_deg})
+    chosen = list(all_specs.keys()) if args.variants == "all" else [v.strip() for v in args.variants.split(",")]
+
+    for name in chosen:
+        if name not in all_specs:
+            print(f"[WARN] Unknown variant '{name}' skipped")
+            continue
+        cfg = all_specs[name]
+        print(f"\n== Variant: {name} cfg={cfg}")
+        pipe = build_pipeline(T=args.T, dataset_key=args.dataset, **cfg)
+
+        OUT_J = np.empty((N*args.copies, C, args.T, V, M), dtype=X.dtype)
+
+        idx = 0
+        for i in range(N):
+            x = X[i]
+            for k in range(args.copies):
+                xa = pipe(x)                            # apply augmentation
+                OUT_J[idx] = xa
+                idx += 1
+            if (i+1) % max(1, N//10) == 0:
+                print(f"  {i+1}/{N}")
+
+        base = os.path.splitext(os.path.basename(args.in_joint))[0].replace("_data_joint","")
+        out_joint = os.path.join(args.out_dir, f"{base}_data_joint_aug_{name}.npy")
+        np.save(out_joint, OUT_J)
+        print("Saved:", out_joint, OUT_J.shape)
+
+        if lbl is not None and args.in_label:
+            out_lbl = replicate_labels(lbl, args.copies)
+            out_label = os.path.join(args.out_dir, f"{base}_label_aug_{name}.pkl")
+            with open(out_label, "wb") as f:
+                pickle.dump(out_lbl, f)
+            print("Saved:", out_label)
+
+if __name__ == "__main__":
+    main()

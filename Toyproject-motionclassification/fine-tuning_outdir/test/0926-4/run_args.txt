@@ -1,0 +1,23 @@
+apply_other_gate: 0
+batch_size: 32
+bias_json: 
+ckpt: /content/drive/MyDrive/Toyproject2/fine-tuning_outdir/0926-4/best.pt
+data_dir: /content/drive/MyDrive/Toyproject2/fine-tuning-1/test/test_ctvm
+debug_list: 20
+device: cuda
+dump_scores: 
+label_dir: /content/drive/MyDrive/Toyproject2/fine-tuning-1/test/label
+model_class: Model
+model_kwargs: {"num_class": 6, "in_channels": 3, "num_point": 25, "num_person": 2, "graph": "graph.ntu_rgb_d.Graph", "graph_args":{"labeling_mode":"spatial"}}
+model_py: /content/drive/MyDrive/Toyproject2/2s-AGCN-0.0/model/agcn.py
+num_classes: 6
+num_workers: 2
+other_top1_min: 0.8
+other_valid_first: 1
+other_valid_last: 5
+out_dir: /content/drive/MyDrive/Toyproject2/fine-tuning_outdir/test/0926-4
+pattern: *.npy
+print_scores: 0
+score_precision: 4
+tb_logdir: /content/drive/MyDrive/Toyproject2/fine-tuning_outdir/test/0926-4
+window_T: 300

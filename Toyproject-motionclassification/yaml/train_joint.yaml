@@ -1,0 +1,45 @@
+work_dir: /content/drive/MyDrive/motion seungok/fine-tuning/work_dir/ntu/xsub/agcn_joint
+model_saved_name: /content/drive/MyDrive/motion seungok/fine-tuning/runs/ntu_cs_agcn_joint
+
+# feeder
+feeder: feeders.feeder.Feeder
+train_feeder_args:
+  data_path: /content/drive/MyDrive/motion seungok/fine-tuning_dataset/train_data_joint.npy
+  label_path: /content/drive/MyDrive/motion seungok/fine-tuning_dataset/train_label.pkl
+  debug: False
+  random_choose: False
+  random_shift: False
+  random_move: False
+  window_size: -1
+  normalization: False
+
+
+# model
+model: model.agcn.Model
+model_args:
+  num_class: 6        # ← 여기만 6으로 수정!
+  num_point: 25
+  num_person: 1
+  graph: graph.ntu_rgb_d.Graph
+  graph_args:
+    labeling_mode: 'spatial'
+
+# optim
+weight_decay: 0.0001
+base_lr: 0.1
+step: [30, 40]
+
+# training
+device: [0, 1, 2, 3]
+batch_size: 64
+test_batch_size: 64
+num_epoch: 50
+nesterov: True
+
+# (선택) 메모용 값 — 실행 시 옵션으로 넘겨 적용해
+seed: 42
+k_folds: 5
+early_stopping:
+  metric: acc
+  patience: 7
+  min_delta: 0.0

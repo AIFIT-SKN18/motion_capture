@@ -1,0 +1,14 @@
+feeder: feeders.feeder.Feeder
+test_feeder_args:
+  data_path: "/content/drive/MyDrive/motion seungok/fine-tuning_dataset/test_data_joint.npy"
+  label_path: "/content/drive/MyDrive/motion seungok/fine-tuning_dataset/test_label.pkl"
+  debug: False
+
+model: model.agcn.Model
+model_args:
+  num_class: 6
+  num_point: 25
+  num_person: 1
+  graph: graph.ntu_rgb_d.Graph
+  graph_args:
+    labeling_mode: spatial
