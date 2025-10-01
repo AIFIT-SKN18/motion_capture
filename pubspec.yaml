@@ -33,11 +33,14 @@ dependencies:
   camera: ^0.10.0   # 카메라 플러그인
   google_mlkit_pose_detection: ^0.14.0
   permission_handler: ^11.3.1  # 권한 관리
+  image_picker: ^1.0.7  # 이미지/비디오 선택
+  video_player: ^2.8.2  # 비디오 플레이어
+  video_thumbnail: ^0.5.3  # 비디오 프레임 캡처
+  path_provider: ^2.1.2  # 임시 디렉토리 접근
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
-  tflite_flutter: ^0.10.0
 
 dev_dependencies:
   flutter_test:
@@ -61,7 +64,7 @@ flutter:
   # the material Icons class.
   uses-material-design: true
   assets:
-    - assets/models/ctvm_4d_model_fixed.tflite
+    - assets/models/model_lite.ptl
 
   # To add assets to your application, add an assets section, like this:
   # assets:

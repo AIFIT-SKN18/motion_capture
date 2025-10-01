@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'pose_detection_screen.dart';
 import 'exercise_selection_screen.dart';
+import 'video_classification_screen.dart';
 
 void main() {
   print('🚀 AIFit 운동 자세 인식 앱 시작!');
@@ -94,6 +95,20 @@ class MainMenuScreen extends StatelessWidget {
               () => Navigator.push(
                 context,
                 MaterialPageRoute(builder: (context) => PoseDetectionScreen()),
+              ),
+            ),
+            
+            SizedBox(height: 20),
+            
+            _buildMenuButton(
+              context,
+              '동영상 분류',
+              '갤러리의 동영상을 선택하여 운동을 분류합니다',
+              Icons.video_library,
+              Colors.orange,
+              () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => VideoClassificationScreen()),
               ),
             ),
             

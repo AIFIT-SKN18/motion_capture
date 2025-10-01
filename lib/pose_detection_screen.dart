@@ -201,7 +201,7 @@ class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
         if (_poseClassifier.isInitialized) {
           try {
             // 신뢰도와 함께 분류 결과 받기
-            final result = _poseClassifier.classifyPoseWithConfidence(landmarks);
+            final result = await _poseClassifier.classifyPoseWithConfidence(landmarks);
             exercise = (result as Map<String, dynamic>)['exercise'] as String;
             confidence = (result as Map<String, dynamic>)['confidence'] as double;
             
