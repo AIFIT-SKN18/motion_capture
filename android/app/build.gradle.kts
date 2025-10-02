@@ -19,6 +19,15 @@ android {
         jvmTarget = JavaVersion.VERSION_11.toString()
     }
 
+    // Suppress warnings from dependencies
+    tasks.withType<JavaCompile> {
+        options.compilerArgs.addAll(listOf(
+            "-Xlint:-unchecked",
+            "-Xlint:-deprecation",
+            "-Xlint:-options"
+        ))
+    }
+
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.aifit.app"
@@ -44,7 +53,5 @@ flutter {
 }
 
 dependencies {
-    // PyTorch Mobile 의존성
-    implementation("org.pytorch:pytorch_android_lite:1.13.1")
-    implementation("org.pytorch:pytorch_android_torchvision_lite:1.13.1")
+    // PyTorch dependencies removed - using TFLite in Dart instead
 }

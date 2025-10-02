@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'pose_detection_screen.dart';
 import 'exercise_selection_screen.dart';
+import 'video_claselection_screen.dart';
 import 'video_classification_screen.dart';
 
 void main() {
@@ -81,20 +81,6 @@ class MainMenuScreen extends StatelessWidget {
               () => Navigator.push(
                 context,
                 MaterialPageRoute(builder: (context) => ExerciseSelectionScreen()),
-              ),
-            ),
-            
-            SizedBox(height: 20),
-            
-            _buildMenuButton(
-              context,
-              '실시간 인식',
-              '카메라로 운동을 감지하고 분류합니다',
-              Icons.camera_alt,
-              Colors.green,
-              () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (context) => PoseDetectionScreen()),
               ),
             ),
             

@@ -26,7 +26,7 @@ class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
   String _currentExercise = 'others';
   double _confidence = 0.0;
   List<List<PoseLandmark>> _landmarkHistory = [];
-  static const int maxHistoryLength = 30; // 최근 30프레임 저장
+  static const int maxHistoryLength = 64; // 최근 64프레임 저장 (영상과 동일)
   
   // 훈련 상태 변수들
   bool _isTraining = false;
@@ -34,6 +34,11 @@ class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
   int _totalCount = 0;
   double _accuracy = 0.0;
   bool _isCorrect = false;
+  
+  // 3초 딜레이 관련 변수
+  bool _isWaitingToStart = false;
+  int _countdown = 3;
+  bool _recognitionStarted = false;
 
   final _orientations = {
     DeviceOrientation.portraitUp: 0,
@@ -193,33 +198,46 @@ class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
           _landmarkHistory.removeAt(0);
         }
         
-        // 운동 분류 수행 (훈련 중이거나 일반 인식 모드)
+        // 운동 분류 수행 (인식이 시작된 후에만)
         String exercise = 'others';
         double confidence = 0.0;
         bool isCorrect = false;
         
-        if (_poseClassifier.isInitialized) {
+        if (_recognitionStarted && _poseClassifier.isInitialized) {
           try {
-            // 신뢰도와 함께 분류 결과 받기
-            final result = await _poseClassifier.classifyPoseWithConfidence(landmarks);
-            exercise = (result as Map<String, dynamic>)['exercise'] as String;
-            confidence = (result as Map<String, dynamic>)['confidence'] as double;
+            // 이미지 크기 정보 가져오기
+            final imageSize = inputImage.metadata?.size;
+            double imageWidth = imageSize?.width ?? 640.0;
+            double imageHeight = imageSize?.height ?? 480.0;
             
-            // 디버깅 정보 출력
-            print('🔍 분류 결과: $exercise, 신뢰도: ${(confidence * 100).toStringAsFixed(1)}%');
+            // 하이브리드 방식: 충분한 히스토리가 있으면 영상 방식, 아니면 실시간 방식
+            if (_landmarkHistory.length >= 32) { // 32프레임 이상이면 영상 방식 사용
+              // 최근 32프레임만 사용하여 빠른 반응성 유지
+              final recentHistory = _landmarkHistory.sublist(_landmarkHistory.length - 32);
+              final result = await _poseClassifier.classifyVideoSequenceNormalized(recentHistory, imageWidth, imageHeight);
+              exercise = (result as Map<String, dynamic>)['exercise'] as String;
+              confidence = (result as Map<String, dynamic>)['confidence'] as double;
+              print('🎬 영상 방식 분류: $exercise (${(confidence * 100).toStringAsFixed(1)}%)');
+            } else {
+              // 프레임이 부족한 경우 실시간 방식 사용
+              final result = await _poseClassifier.classifyPoseWithConfidenceNormalized(landmarks, imageWidth, imageHeight);
+              exercise = (result as Map<String, dynamic>)['exercise'] as String;
+              confidence = (result as Map<String, dynamic>)['confidence'] as double;
+              print('📱 실시간 방식 분류: $exercise (${(confidence * 100).toStringAsFixed(1)}%)');
+            }
             
             // 선택된 운동과 비교 (훈련 중일 때만)
             if (_isTraining && widget.selectedExercise != null) {
-              print('🎯 선택된 운동: ${widget.selectedExercise!.id}');
+              // side_lateral_raise는 더 관대한 임계값 적용
+              double threshold = widget.selectedExercise!.id == 'side_lateral_raise' ? 0.2 : 0.4;
               
-              if (exercise == widget.selectedExercise!.id && confidence > 0.6) {
+              if (exercise == widget.selectedExercise!.id && confidence > threshold) {
                 isCorrect = true;
                 _correctCount++;
-                print('✅ 올바른 운동 인식!');
-              } else if (exercise == widget.selectedExercise!.id && confidence <= 0.6) {
-                print('⚠️ 올바른 운동이지만 신뢰도 낮음: ${(confidence * 100).toStringAsFixed(1)}%');
-              } else {
-                print('❌ 잘못된 운동 인식: $exercise (선택: ${widget.selectedExercise!.id})');
+              } else if (exercise == widget.selectedExercise!.id && confidence > threshold * 0.5) {
+                // 올바른 운동이지만 신뢰도가 낮은 경우도 부분적으로 인정
+                isCorrect = true;
+                _correctCount++;
               }
               
               _totalCount++;
@@ -379,8 +397,29 @@ class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
                     SizedBox(height: 8),
                   ],
                   
+                  // 카운트다운 표시
+                  if (_isWaitingToStart) ...[
+                    Text(
+                      '$_countdown',
+                      style: TextStyle(
+                        color: Colors.yellow,
+                        fontSize: 48,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    SizedBox(height: 8),
+                    Text(
+                      '초 후 인식 시작...',
+                      style: TextStyle(
+                        color: Colors.yellow,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    SizedBox(height: 8),
+                  ]
                   // 훈련 상태 표시
-                  if (_isTraining) ...[
+                  else if (_isTraining) ...[
                     Text(
                       '훈련 진행 중',
                       style: TextStyle(
@@ -565,11 +604,11 @@ class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
                   ElevatedButton.icon(
-                    onPressed: _isTraining ? _stopTraining : _startTraining,
-                    icon: Icon(_isTraining ? Icons.stop : Icons.play_arrow),
-                    label: Text(_isTraining ? '정지' : '시작'),
+                    onPressed: (_isTraining || _isWaitingToStart) ? _stopTraining : _startTraining,
+                    icon: Icon((_isTraining || _isWaitingToStart) ? Icons.stop : Icons.play_arrow),
+                    label: Text((_isTraining || _isWaitingToStart) ? '정지' : '시작'),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: _isTraining ? Colors.red : Colors.green,
+                      backgroundColor: (_isTraining || _isWaitingToStart) ? Colors.red : Colors.green,
                       foregroundColor: Colors.white,
                       padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                     ),
@@ -605,16 +644,37 @@ class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
   }
   
   // 훈련 시작
-  void _startTraining() {
+  void _startTraining() async {
     setState(() {
-      _isTraining = true;
+      _isWaitingToStart = true;
+      _countdown = 3;
+      _recognitionStarted = false;
     });
+    
+    // 3초 카운트다운
+    for (int i = 3; i > 0; i--) {
+      setState(() {
+        _countdown = i;
+      });
+      print('⏱️ 시작까지: $i초');
+      await Future.delayed(Duration(seconds: 1));
+    }
+    
+    // 인식 시작
+    setState(() {
+      _isWaitingToStart = false;
+      _isTraining = true;
+      _recognitionStarted = true;
+    });
+    print('✅ 인식 시작!');
   }
   
   // 훈련 정지
   void _stopTraining() {
     setState(() {
       _isTraining = false;
+      _recognitionStarted = false;
+      _isWaitingToStart = false;
     });
   }
   
@@ -627,6 +687,8 @@ class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
       _isCorrect = false;
       _currentExercise = 'others';
       _confidence = 0.0;
+      _recognitionStarted = false;
+      _isWaitingToStart = false;
     });
   }
   
