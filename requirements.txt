@@ -1,0 +1,41 @@
+# Core dependencies
+numpy<2
+python-dateutil
+
+# Computer vision
+opencv-python
+mediapipe
+
+# Deep learning - PyTorch
+torch
+torchvision
+torchaudio
+
+# ONNX related
+onnx>=1.12.0
+onnxruntime
+onnxsim
+onnx-graphsurgeon
+
+# onnx2tf dependencies (use older version for Windows compatibility)
+onnx2tf==1.20.5
+simple-onnx-processing-tools
+sne4onnx
+sng4onnx
+onnxconverter-common
+onnx-simplifier
+
+# TensorFlow
+tensorflow>=2.13.0
+tf-keras
+flatbuffers
+
+# Utilities
+matplotlib
+protobuf>=3.20.0
+psutil
+pyyaml
+packaging
+typing-extensions
+h5py
+gast
