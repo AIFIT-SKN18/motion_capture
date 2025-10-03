@@ -177,7 +177,7 @@ class NTUConverter {
   /// Returns: [1, 3, T, 25, 1] shape의 Float32List
   static Float32List createModelInput(
     List<List<List<double>>> sequence, {
-    int targetFrames = 64,
+    int targetFrames = 100,
   }) {
     const int numChannels = 3; // x, y, z
     const int numKeypoints = 25;

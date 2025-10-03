@@ -9,8 +9,8 @@ class PoseClassifier {
   static const platform = MethodChannel('com.example.aifit/tflite');
   bool _isInitialized = false;
 
-  // 모델 입력/출력 shape (ms_g3d TFLite: [1, 64, 25, 1, 3])
-  static const List<int> inputShape = [1, 64, 25, 1, 3];
+  // 모델 입력/출력 shape (ms_g3d TFLite: [1, 100, 25, 1, 3])
+  static const List<int> inputShape = [1, 100, 25, 1, 3];
   static const List<int> outputShape = [1, 6];
 
   // 운동 클래스
@@ -25,7 +25,7 @@ class PoseClassifier {
 
   // 포즈 히스토리 (실시간 인식용)
   final List<List<PoseLandmark>> _poseHistory = [];
-  static const int maxHistoryLength = 64;
+  static const int maxHistoryLength = 100;
 
   bool get isInitialized => _isInitialized;
 
@@ -36,7 +36,7 @@ class PoseClassifier {
 
       // 네이티브 코드에서 모델 로드
       final String result = await platform.invokeMethod('loadModel', {
-        'modelPath': 'flutter_assets/assets/models/weights_8_744_simplified_float16.tflite',
+        'modelPath': 'flutter_assets/assets/models/tflite_simplified_float16_100frame.tflite',
       });
 
       print('✅ $result');
@@ -116,7 +116,7 @@ class PoseClassifier {
       // 2. (T,V,C) → (C,T,V,M)
       final Float32List chw = NTUConverter.createModelInput(ntuSequence);
       // 3. 앱 전달은 (T,V,M,C) 순서로 고정 전달 (네이티브에서 실제 텐서 순서에 맞게 재배열)
-      const int C = 3, T = 64, V = 25, M = 1;
+      const int C = 3, T = 100, V = 25, M = 1;
       final Float32List input = Float32List(T * V * M * C);
       int idx = 0;
       for (int t = 0; t < T; t++) {

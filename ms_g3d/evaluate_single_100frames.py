@@ -7,7 +7,7 @@ from pose_extractor import PoseExtractor
 def predict_exercise_tflite(video_path, tflite_model_path, pose_extractor):
     """
     TFLite 모델로 새로운 비디오에 대해 덤벨/바벨 운동 분류 수행
-    Colab과 동일한 전처리 사용 (64프레임, 정규화 없음)
+    Colab과 동일한 전처리 사용 (100프레임, 정규화 없음)
     """
     class_names = [
         'benchpress',       # 0
@@ -37,8 +37,8 @@ def predict_exercise_tflite(video_path, tflite_model_path, pose_extractor):
     skeleton_data = skeleton_seq.transpose(2, 0, 1)  # (3, T, 25)
     skeleton_data = np.expand_dims(skeleton_data, axis=-1)  # (3, T, 25, 1)
 
-    # 윈도우 크기 조정 (Colab과 동일: 64프레임)
-    window_size = 64
+    # 윈도우 크기 조정 (Colab과 동일: 100프레임)
+    window_size = 100
     C, T, V, M = skeleton_data.shape
     print(f"현재 shape: (C={C}, T={T}, V={V}, M={M}), window_size: {window_size}")
 
@@ -49,12 +49,12 @@ def predict_exercise_tflite(video_path, tflite_model_path, pose_extractor):
         pad_width = ((0, 0), (0, window_size - T), (0, 0), (0, 0))
         skeleton_data = np.pad(skeleton_data, pad_width, mode='edge')
 
-    print(f"윈도우 조정 후 shape: {skeleton_data.shape}")  # (3, 64, 25, 1)
+    print(f"윈도우 조정 후 shape: {skeleton_data.shape}")  # (3, 100, 25, 1)
 
     # TFLite 형식으로 변환: (C, T, V, M) -> (T, V, M, C)
-    skeleton_data = skeleton_data.transpose(1, 2, 3, 0)  # (64, 25, 1, 3)
+    skeleton_data = skeleton_data.transpose(1, 2, 3, 0)  # (100, 25, 1, 3)
 
-    # 배치 차원 추가: (64, 25, 1, 3) -> (1, 64, 25, 1, 3)
+    # 배치 차원 추가: (100, 25, 1, 3) -> (1, 100, 25, 1, 3)
     input_data = np.expand_dims(skeleton_data, axis=0).astype(np.float32)
     print(f"최종 입력 shape: {input_data.shape}")
 
@@ -81,8 +81,8 @@ if __name__ == "__main__":
     pose_extractor = PoseExtractor()
 
     # 설정
-    test_folder = "C:\\Users\\Playdata\\Desktop\\tflite_test\\predict_mp4"
-    tflite_model_path = "C:\\Users\\Playdata\\Desktop\\tflite_test\\weights-8-744_simplified_float32.tflite"
+    test_folder = "C:\\Users\\Playdata\\Desktop\\tflite_test\\motion_capture\\predict_mp4"
+    tflite_model_path = "C:\\Users\\Playdata\\Desktop\\tflite_test\\motion_capture\\tflite_simplified_float16.tflite"
 
     # 테스트 비디오 리스트
     test_videos = [
@@ -90,8 +90,8 @@ if __name__ == "__main__":
         ("test2.mp4", "deadlift"),
         ("test3.mp4", "lunges"),
         ("test4.mp4", "squat"),
-        ("test5.mp4", "bench_press"),
-        ("00251201.mp4", "bench_press"),
+        ("test5.mp4", "benchpress"),
+        ("00251201.mp4", "benchpress"),
         ("00321201.mp4", "deadlift"),
         ("00431201.mp4", "squat"),
     ]

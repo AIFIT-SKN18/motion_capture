@@ -115,8 +115,8 @@ class MainActivity : FlutterActivity() {
 
         // 입력 데이터 재배열: 앱은 기본적으로 (T,V,M,C) 순서로 전달
         // 텐서가 (1,64,25,1,3)면 그대로 순차 복사, (1,3,64,25,1)이면 (T,V,M,C)->(C,T,V,M)로 재배열
-        val isTVMC = (dims.size == 5 && dims[1] == 64 && dims[4] == 3)
-        val T = 64; val V = 25; val M = 1; val C = 3
+        val isTVMC = (dims.size == 5 && dims[4] == 3 && dims[2] == 25)
+        val T = dims[1]; val V = 25; val M = 1; val C = 3
 
         if (isTVMC) {
             // 그대로 복사

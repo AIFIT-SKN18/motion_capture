@@ -1,5 +1,5 @@
 """
-64프레임용 TFLite 모델 변환
+100프레임용 TFLite 모델 변환
 Colab 테스트와 동일한 입력 형식 사용
 """
 import sys
@@ -11,22 +11,22 @@ if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
 
 # MS-G3D 경로 추가
-sys.path.insert(0, r'C:\Users\Playdata\Desktop\tflite_test\MS-G3D')
+sys.path.insert(0, r'C:\Users\Playdata\Desktop\tflite_test\motion_capture\MS-G3D')
 
 import torch
 import numpy as np
 
 print("=" * 80)
-print("64프레임용 TFLite 변환")
+print("100프레임용 TFLite 변환")
 print("=" * 80)
 
 # 모델 import
 from model.msg3d import Model
 
 # 설정
-PT_MODEL_PATH = r"C:\Users\Playdata\Desktop\tflite_test\weights-8-744.pt"
-OUTPUT_ONNX = r"C:\Users\Playdata\Desktop\tflite_test\weights-8-744.onnx"
-OUTPUT_DIR = r"C:\Users\Playdata\Desktop\tflite_test"
+PT_MODEL_PATH = r"C:\Users\Playdata\Desktop\\tflite_test\\motion_capture\\weights-9-837_100frame.pt"
+OUTPUT_ONNX = r"C:\Users\Playdata\Desktop\\tflite_test\\motion_capture\\tflite.onnx"
+OUTPUT_DIR = r"C:\Users\Playdata\Desktop\\tflite_test\\motion_capture\\"
 
 # 1. PyTorch 모델 로드
 print("\n[1] PyTorch 모델 로드")
@@ -53,9 +53,9 @@ model.load_state_dict(state_dict)
 model.eval()
 print("모델 로드 완료")
 
-# 2. 테스트 입력 생성 (64프레임!)
-print("\n[2] 테스트 입력 생성 (64프레임)")
-dummy_input = torch.randn(1, 3, 64, 25, 1)  # window_size=64
+# 2. 테스트 입력 생성 (100프레임!)
+print("\n[2] 테스트 입력 생성 (100프레임)")
+dummy_input = torch.randn(1, 3, 100, 25, 1)  # window_size=100
 print(f"입력 shape: {dummy_input.shape}")
 
 # 3. PyTorch 추론 테스트
@@ -139,7 +139,7 @@ if result.returncode == 0:
     print("TFLite 변환 성공")
 
     # 생성된 파일 찾기
-    tflite_files = [f for f in os.listdir(OUTPUT_DIR) if f.endswith('.tflite') and '64frames' in f]
+    tflite_files = [f for f in os.listdir(OUTPUT_DIR) if f.endswith('.tflite') and '100frames' in f]
     if tflite_files:
         print(f"생성된 파일: {tflite_files}")
 
@@ -147,7 +147,7 @@ if result.returncode == 0:
         for f in tflite_files:
             if 'float32' in f:
                 src = os.path.join(OUTPUT_DIR, f)
-                dst = os.path.join(OUTPUT_DIR, "weights-64frames-float32.tflite")
+                dst = os.path.join(OUTPUT_DIR, "weights-100frames-float32.tflite")
                 if os.path.exists(dst):
                     os.remove(dst)
                 os.rename(src, dst)
@@ -160,6 +160,6 @@ print("\n" + "=" * 80)
 print("완료!")
 print("=" * 80)
 print("\n다음 단계:")
-print("1. weights-64frames-float32.tflite 파일 확인")
+print("1. weights-100frames-float32.tflite 파일 확인")
 print("2. evaluate_single.py에서 모델 경로 변경")
 print("3. 재테스트 실행")

@@ -96,8 +96,8 @@ class _VideoScreenState extends State<VideoScreen> {
       final duration = _videoController!.value.duration;
       final totalMs = duration.inMilliseconds;
 
-      // 동영상에서 균등하게 64 프레임 추출 (길이에 상관없이 강제 64)
-      const framesToExtract = 64;
+      // 모델 입력 길이에 맞춰 균등하게 프레임 추출
+      final int framesToExtract = PoseClassifier.inputShape[1];
       final intervalMs = totalMs / framesToExtract;
 
       List<List<PoseLandmark>> poseSequence = [];
@@ -162,15 +162,15 @@ class _VideoScreenState extends State<VideoScreen> {
         _analysisProgress = '운동 동작 분류 중...';
       });
 
-      // 포즈 시퀀스 길이를 정확히 64로 맞추기 (동일 리스트 참조로 인한 concurrent 수정)
-      if (poseSequence.length < 64) {
-        final needed = 64 - poseSequence.length;
+      // 포즈 시퀀스 길이를 모델 입력 길이에 맞추기 (동일 리스트 참조로 인한 concurrent 수정)
+      if (poseSequence.length < framesToExtract) {
+        final needed = framesToExtract - poseSequence.length;
         final source = List<List<PoseLandmark>>.from(poseSequence);
         for (int i = 0; i < needed; i++) {
           poseSequence.add(source[(i % source.length)]);
         }
-      } else if (poseSequence.length > 64) {
-        poseSequence = poseSequence.sublist(0, 64);
+      } else if (poseSequence.length > framesToExtract) {
+        poseSequence = poseSequence.sublist(0, framesToExtract);
       }
 
       // 분류 실행 - 썸네일 실제 이미지 크기를 사용하여 NTU 정규화 일치
