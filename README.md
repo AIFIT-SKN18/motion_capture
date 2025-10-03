@@ -37,7 +37,7 @@ flutter pub get
 - `weights_8_744_simplified_float16.tflite`
 
 **모델 정보**:
-- 입력 Shape: [1, 3, 64, 25, 1]
+- 입력 Shape: [1, 3, 100, 25, 1]
 - 출력 Shape: [1, 6]
 - 데이터 타입: float16
 
@@ -64,7 +64,7 @@ lib/
 
 assets/
 └── models/
-    └── weights_8_744_simplified_float16.tflite
+    └── tflite_simplified_float16_100frame.tflite
 ```
 
 ## 사용 방법
