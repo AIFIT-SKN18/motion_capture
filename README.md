@@ -1,14 +1,15 @@
 ## 폴더 및 파일 구조
-- **MS_G3D_Improved.ipynb**  
+- **MS_G3D_Improved_100frame.ipynb**  
   메인 노트북 파일로, 실행 시 필요한 패키지와 폴더, 파일을 자동으로 설치 및 생성합니다.
 - **main.py**  
   노트북 파일과 같은 위치에 두고 사용합니다.  
 
   ------- 위 두 파일은 colab 환경에서 실행할 것--------
-- **convert_to_tflite_64frames.py, evaluate_single_64frames.py, pose_extractor.py**  
+
+- **convert_to_tflite_100frames.py, evaluate_single_100frames.py, pose_extractor.py**  
   데이터 변환, 평가, 포즈 추출 등 보조 기능을 담당합니다.
 - **requirements.txt**  
-  필요한 패키지 목록입니다. (Colab에서 노트북 실행 시 자동 설치)
+  필요한 패키지 목록입니다.
 - **weights-8-744.pt**  
   학습된 모델 가중치 파일입니다.
 - **MS-G3D/**  
@@ -17,4 +18,4 @@
 
   # 오류 가능성
 
-  데이터 경로, 파일명, 파일 존재 유무
+  데이터 경로, 파일명, 파일 존재 유무, python version = 3.10
