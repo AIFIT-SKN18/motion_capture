@@ -15,7 +15,7 @@ class PoseDetectorService {
       _poseDetector = PoseDetector(
         options: PoseDetectorOptions(
           mode: PoseDetectionMode.stream, // 실시간 스트림 모드
-          model: PoseDetectionModel.accurate, // 정확도 우선
+          model: PoseDetectionModel.accurate, // 정확도 우선 모델
         ),
       );
 

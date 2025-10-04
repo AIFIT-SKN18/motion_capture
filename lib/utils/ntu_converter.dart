@@ -78,7 +78,10 @@ class NTUConverter {
     // MediaPipe의 z는 이미지 폭을 기준으로 정규화된 값(대개 음수)인데
     // ML Kit의 z 스케일과 다를 수 있어 혼선을 줄이기 위해 0으로 고정
     // (훈련 파이프라인과 차원을 맞추되, z 스케일 불일치 영향 제거)
-    double normalizeZ(double z) => 0.0;
+    // -> z값을 0으로 고정하면 스쿼트, 런지, 데드리프트와 같이 깊이 정보가 중요한 운동을 구분하기 어려움.
+    // -> Python 코드(원본)는 z값을 사용하므로, Dart에서도 z값을 사용하도록 수정.
+    // -> ML Kit의 z값은 x와 유사한 스케일을 가지므로 imageWidth로 정규화.
+    double normalizeZ(double z) => z / imageWidth;
 
     // NTU RGB+D 25개 관절점 매핑
     
@@ -122,49 +125,107 @@ class NTUConverter {
     }
 
     // 4-7: left arm (shoulder, elbow, wrist, hand)
-    joints[4] = [normalizeX(lm11.x), normalizeY(lm11.y), normalizeZ(lm11.z)];
-    final lm13 = _landmarkByMpIndex(landmarks, 13);
-    if (lm13 != null) joints[5] = [normalizeX(lm13.x), normalizeY(lm13.y), normalizeZ(lm13.z)];
-    final lm15 = _landmarkByMpIndex(landmarks, 15);
-    if (lm15 != null) joints[6] = [normalizeX(lm15.x), normalizeY(lm15.y), normalizeZ(lm15.z)];
-    if (lm15 != null) joints[7] = [normalizeX(lm15.x), normalizeY(lm15.y), normalizeZ(lm15.z)];
+    // 좌우 반전 시 left/right 관절점을 바꿔서 매핑
+    if (flipHorizontally) {
+      // 좌우 반전 시: left arm = right arm의 좌표
+      joints[4] = [normalizeX(lm12.x), normalizeY(lm12.y), normalizeZ(lm12.z)];
+      final lm14 = _landmarkByMpIndex(landmarks, 14);
+      if (lm14 != null) joints[5] = [normalizeX(lm14.x), normalizeY(lm14.y), normalizeZ(lm14.z)];
+      final lm16 = _landmarkByMpIndex(landmarks, 16);
+      if (lm16 != null) joints[6] = [normalizeX(lm16.x), normalizeY(lm16.y), normalizeZ(lm16.z)];
+      if (lm16 != null) joints[7] = [normalizeX(lm16.x), normalizeY(lm16.y), normalizeZ(lm16.z)];
 
-    // 8-11: right arm (shoulder, elbow, wrist, hand)
-    joints[8] = [normalizeX(lm12.x), normalizeY(lm12.y), normalizeZ(lm12.z)];
-    final lm14 = _landmarkByMpIndex(landmarks, 14);
-    if (lm14 != null) joints[9] = [normalizeX(lm14.x), normalizeY(lm14.y), normalizeZ(lm14.z)];
-    final lm16 = _landmarkByMpIndex(landmarks, 16);
-    if (lm16 != null) joints[10] = [normalizeX(lm16.x), normalizeY(lm16.y), normalizeZ(lm16.z)];
-    if (lm16 != null) joints[11] = [normalizeX(lm16.x), normalizeY(lm16.y), normalizeZ(lm16.z)];
+      // 8-11: right arm (shoulder, elbow, wrist, hand)
+      // 좌우 반전 시: right arm = left arm의 좌표
+      joints[8] = [normalizeX(lm11.x), normalizeY(lm11.y), normalizeZ(lm11.z)];
+      final lm13 = _landmarkByMpIndex(landmarks, 13);
+      if (lm13 != null) joints[9] = [normalizeX(lm13.x), normalizeY(lm13.y), normalizeZ(lm13.z)];
+      final lm15 = _landmarkByMpIndex(landmarks, 15);
+      if (lm15 != null) joints[10] = [normalizeX(lm15.x), normalizeY(lm15.y), normalizeZ(lm15.z)];
+      if (lm15 != null) joints[11] = [normalizeX(lm15.x), normalizeY(lm15.y), normalizeZ(lm15.z)];
+    } else {
+      // 정상 매핑
+      joints[4] = [normalizeX(lm11.x), normalizeY(lm11.y), normalizeZ(lm11.z)];
+      final lm13 = _landmarkByMpIndex(landmarks, 13);
+      if (lm13 != null) joints[5] = [normalizeX(lm13.x), normalizeY(lm13.y), normalizeZ(lm13.z)];
+      final lm15 = _landmarkByMpIndex(landmarks, 15);
+      if (lm15 != null) joints[6] = [normalizeX(lm15.x), normalizeY(lm15.y), normalizeZ(lm15.z)];
+      if (lm15 != null) joints[7] = [normalizeX(lm15.x), normalizeY(lm15.y), normalizeZ(lm15.z)];
+
+      // 8-11: right arm (shoulder, elbow, wrist, hand)
+      joints[8] = [normalizeX(lm12.x), normalizeY(lm12.y), normalizeZ(lm12.z)];
+      final lm14 = _landmarkByMpIndex(landmarks, 14);
+      if (lm14 != null) joints[9] = [normalizeX(lm14.x), normalizeY(lm14.y), normalizeZ(lm14.z)];
+      final lm16 = _landmarkByMpIndex(landmarks, 16);
+      if (lm16 != null) joints[10] = [normalizeX(lm16.x), normalizeY(lm16.y), normalizeZ(lm16.z)];
+      if (lm16 != null) joints[11] = [normalizeX(lm16.x), normalizeY(lm16.y), normalizeZ(lm16.z)];
+    }
 
     // 12-15: left leg (hip, knee, ankle, foot)
-    joints[12] = [normalizeX(lm23.x), normalizeY(lm23.y), normalizeZ(lm23.z)];
-    final lm25 = _landmarkByMpIndex(landmarks, 25);
-    if (lm25 != null) joints[13] = [normalizeX(lm25.x), normalizeY(lm25.y), normalizeZ(lm25.z)];
-    final lm27 = _landmarkByMpIndex(landmarks, 27);
-    if (lm27 != null) joints[14] = [normalizeX(lm27.x), normalizeY(lm27.y), normalizeZ(lm27.z)];
-    final lm31 = _landmarkByMpIndex(landmarks, 31);
-    if (lm31 != null) joints[15] = [normalizeX(lm31.x), normalizeY(lm31.y), normalizeZ(lm31.z)];
-
     // 16-19: right leg (hip, knee, ankle, foot)
-    joints[16] = [normalizeX(lm24.x), normalizeY(lm24.y), normalizeZ(lm24.z)];
-    final lm26 = _landmarkByMpIndex(landmarks, 26);
-    if (lm26 != null) joints[17] = [normalizeX(lm26.x), normalizeY(lm26.y), normalizeZ(lm26.z)];
-    final lm28 = _landmarkByMpIndex(landmarks, 28);
-    if (lm28 != null) joints[18] = [normalizeX(lm28.x), normalizeY(lm28.y), normalizeZ(lm28.z)];
-    final lm32 = _landmarkByMpIndex(landmarks, 32);
-    if (lm32 != null) joints[19] = [normalizeX(lm32.x), normalizeY(lm32.y), normalizeZ(lm32.z)];
+    if (flipHorizontally) {
+      // 좌우 반전 시: left leg = right leg의 좌표
+      joints[12] = [normalizeX(lm24.x), normalizeY(lm24.y), normalizeZ(lm24.z)];
+      final lm26 = _landmarkByMpIndex(landmarks, 26);
+      if (lm26 != null) joints[13] = [normalizeX(lm26.x), normalizeY(lm26.y), normalizeZ(lm26.z)];
+      final lm28 = _landmarkByMpIndex(landmarks, 28);
+      if (lm28 != null) joints[14] = [normalizeX(lm28.x), normalizeY(lm28.y), normalizeZ(lm28.z)];
+      final lm32 = _landmarkByMpIndex(landmarks, 32);
+      if (lm32 != null) joints[15] = [normalizeX(lm32.x), normalizeY(lm32.y), normalizeZ(lm32.z)];
+
+      // 좌우 반전 시: right leg = left leg의 좌표
+      joints[16] = [normalizeX(lm23.x), normalizeY(lm23.y), normalizeZ(lm23.z)];
+      final lm25 = _landmarkByMpIndex(landmarks, 25);
+      if (lm25 != null) joints[17] = [normalizeX(lm25.x), normalizeY(lm25.y), normalizeZ(lm25.z)];
+      final lm27 = _landmarkByMpIndex(landmarks, 27);
+      if (lm27 != null) joints[18] = [normalizeX(lm27.x), normalizeY(lm27.y), normalizeZ(lm27.z)];
+      final lm31 = _landmarkByMpIndex(landmarks, 31);
+      if (lm31 != null) joints[19] = [normalizeX(lm31.x), normalizeY(lm31.y), normalizeZ(lm31.z)];
+    } else {
+      // 정상 매핑
+      joints[12] = [normalizeX(lm23.x), normalizeY(lm23.y), normalizeZ(lm23.z)];
+      final lm25 = _landmarkByMpIndex(landmarks, 25);
+      if (lm25 != null) joints[13] = [normalizeX(lm25.x), normalizeY(lm25.y), normalizeZ(lm25.z)];
+      final lm27 = _landmarkByMpIndex(landmarks, 27);
+      if (lm27 != null) joints[14] = [normalizeX(lm27.x), normalizeY(lm27.y), normalizeZ(lm27.z)];
+      final lm31 = _landmarkByMpIndex(landmarks, 31);
+      if (lm31 != null) joints[15] = [normalizeX(lm31.x), normalizeY(lm31.y), normalizeZ(lm31.z)];
+
+      joints[16] = [normalizeX(lm24.x), normalizeY(lm24.y), normalizeZ(lm24.z)];
+      final lm26 = _landmarkByMpIndex(landmarks, 26);
+      if (lm26 != null) joints[17] = [normalizeX(lm26.x), normalizeY(lm26.y), normalizeZ(lm26.z)];
+      final lm28 = _landmarkByMpIndex(landmarks, 28);
+      if (lm28 != null) joints[18] = [normalizeX(lm28.x), normalizeY(lm28.y), normalizeZ(lm28.z)];
+      final lm32 = _landmarkByMpIndex(landmarks, 32);
+      if (lm32 != null) joints[19] = [normalizeX(lm32.x), normalizeY(lm32.y), normalizeZ(lm32.z)];
+    }
 
     // 20-24: additional points
     joints[20] = shoulderCenter;
-    final lm17 = _landmarkByMpIndex(landmarks, 17);
-    if (lm17 != null) joints[21] = [normalizeX(lm17.x), normalizeY(lm17.y), normalizeZ(lm17.z)];
-    final lm21 = _landmarkByMpIndex(landmarks, 21);
-    if (lm21 != null) joints[22] = [normalizeX(lm21.x), normalizeY(lm21.y), normalizeZ(lm21.z)];
-    final lm18 = _landmarkByMpIndex(landmarks, 18);
-    if (lm18 != null) joints[23] = [normalizeX(lm18.x), normalizeY(lm18.y), normalizeZ(lm18.z)];
-    final lm22 = _landmarkByMpIndex(landmarks, 22);
-    if (lm22 != null) joints[24] = [normalizeX(lm22.x), normalizeY(lm22.y), normalizeZ(lm22.z)];
+    
+    if (flipHorizontally) {
+      // 좌우 반전 시: left hand points = right hand points의 좌표
+      final lm18 = _landmarkByMpIndex(landmarks, 18);
+      if (lm18 != null) joints[21] = [normalizeX(lm18.x), normalizeY(lm18.y), normalizeZ(lm18.z)];
+      final lm22 = _landmarkByMpIndex(landmarks, 22);
+      if (lm22 != null) joints[22] = [normalizeX(lm22.x), normalizeY(lm22.y), normalizeZ(lm22.z)];
+      
+      // 좌우 반전 시: right hand points = left hand points의 좌표
+      final lm17 = _landmarkByMpIndex(landmarks, 17);
+      if (lm17 != null) joints[23] = [normalizeX(lm17.x), normalizeY(lm17.y), normalizeZ(lm17.z)];
+      final lm21 = _landmarkByMpIndex(landmarks, 21);
+      if (lm21 != null) joints[24] = [normalizeX(lm21.x), normalizeY(lm21.y), normalizeZ(lm21.z)];
+    } else {
+      // 정상 매핑
+      final lm17 = _landmarkByMpIndex(landmarks, 17);
+      if (lm17 != null) joints[21] = [normalizeX(lm17.x), normalizeY(lm17.y), normalizeZ(lm17.z)];
+      final lm21 = _landmarkByMpIndex(landmarks, 21);
+      if (lm21 != null) joints[22] = [normalizeX(lm21.x), normalizeY(lm21.y), normalizeZ(lm21.z)];
+      final lm18 = _landmarkByMpIndex(landmarks, 18);
+      if (lm18 != null) joints[23] = [normalizeX(lm18.x), normalizeY(lm18.y), normalizeZ(lm18.z)];
+      final lm22 = _landmarkByMpIndex(landmarks, 22);
+      if (lm22 != null) joints[24] = [normalizeX(lm22.x), normalizeY(lm22.y), normalizeZ(lm22.z)];
+    }
 
     return joints;
   }

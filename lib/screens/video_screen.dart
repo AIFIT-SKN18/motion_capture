@@ -7,6 +7,8 @@ import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
 import '../services/pose_detector.dart';
 import '../services/pose_classifier.dart';
+import '../utils/memory_monitor.dart';
+import '../utils/ntu_converter.dart';
 
 /// 동영상 분석 화면
 class VideoScreen extends StatefulWidget {
@@ -45,8 +47,11 @@ class _VideoScreenState extends State<VideoScreen> {
 
   Future<void> _initializeServices() async {
     try {
+      MemoryMonitor.printMemoryUsage('서비스 초기화 전');
       await _poseDetector.initialize();
+      MemoryMonitor.printMemoryUsage('PoseDetector 초기화 후');
       await _poseClassifier.initialize();
+      MemoryMonitor.printMemoryUsage('PoseClassifier 초기화 후');
     } catch (e) {
       _showErrorDialog('초기화 실패', e.toString());
     }
@@ -93,6 +98,7 @@ class _VideoScreenState extends State<VideoScreen> {
     });
 
     try {
+      MemoryMonitor.printMemoryUsage('비디오 분석 시작');
       final duration = _videoController!.value.duration;
       final totalMs = duration.inMilliseconds;
 
@@ -158,6 +164,7 @@ class _VideoScreenState extends State<VideoScreen> {
         return;
       }
 
+      MemoryMonitor.printMemoryUsage('포즈 추출 완료');
       setState(() {
         _analysisProgress = '운동 동작 분류 중...';
       });
@@ -173,13 +180,21 @@ class _VideoScreenState extends State<VideoScreen> {
         poseSequence = poseSequence.sublist(0, framesToExtract);
       }
 
-      // 분류 실행 - 썸네일 실제 이미지 크기를 사용하여 NTU 정규화 일치
-      final classificationResult = await _poseClassifier.classify(
-        poseSequence,
-        frameImageWidth ?? _videoController!.value.size.width,
-        frameImageHeight ?? _videoController!.value.size.height,
-      );
+      // NTU 포맷으로 변환
+      final imageWidth = frameImageWidth ?? _videoController!.value.size.width;
+      final imageHeight = frameImageHeight ?? _videoController!.value.size.height;
+      final ntuSequence = poseSequence
+          .map((landmarks) => NTUConverter.mediapipeToNTU(
+                landmarks,
+                imageWidth,
+                imageHeight,
+              ))
+          .toList();
 
+      // 분류 실행
+      final classificationResult = await _poseClassifier.classify(ntuSequence);
+
+      MemoryMonitor.printMemoryUsage('분류 완료');
       setState(() {
         _result = _getKoreanExerciseName(classificationResult.exercise);
         _confidence = classificationResult.confidence;

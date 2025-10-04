@@ -23,8 +23,8 @@ class PoseClassifier {
     'others',
   ];
 
-  // 포즈 히스토리 (실시간 인식용)
-  final List<List<PoseLandmark>> _poseHistory = [];
+  // 포즈 히스토리 (실시간 인식용, NTU 포맷)
+  final List<List<List<double>>> _ntuHistory = [];
   static const int maxHistoryLength = 100;
 
   bool get isInitialized => _isInitialized;
@@ -51,34 +51,55 @@ class PoseClassifier {
     }
   }
 
-  /// 포즈 히스토리에 추가
-  void addPoseToHistory(List<PoseLandmark> landmarks) {
-    _poseHistory.add(landmarks);
-    if (_poseHistory.length > maxHistoryLength) {
-      _poseHistory.removeAt(0);
+  /// 실시간 프레임을 처리하고 NTU 포맷으로 변환하여 히스토리에 추가
+  void processPoseForRealtime(
+    List<PoseLandmark> landmarks,
+    double imageWidth,
+    double imageHeight,
+  ) {
+    final ntuJoints = NTUConverter.mediapipeToNTU(
+      landmarks,
+      imageWidth,
+      imageHeight,
+    );
+    _ntuHistory.add(ntuJoints);
+    if (_ntuHistory.length > maxHistoryLength) {
+      _ntuHistory.removeAt(0);
+    }
+  }
+
+  /// 실시간 프레임을 처리하고 NTU 포맷으로 변환하여 히스토리에 추가 (좌우 반전 지원)
+  void processPoseForRealtimeWithFlip(
+    List<PoseLandmark> landmarks,
+    double imageWidth,
+    double imageHeight,
+    bool flipHorizontally,
+  ) {
+    final ntuJoints = NTUConverter.mediapipeToNTU(
+      landmarks,
+      imageWidth,
+      imageHeight,
+      flipHorizontally: flipHorizontally,
+    );
+    _ntuHistory.add(ntuJoints);
+    if (_ntuHistory.length > maxHistoryLength) {
+      _ntuHistory.removeAt(0);
     }
   }
 
   /// 포즈 히스토리 초기화
   void clearHistory() {
-    _poseHistory.clear();
+    _ntuHistory.clear();
   }
 
   /// 실시간 포즈 분류 (히스토리 사용)
-  Future<ClassificationResult> classifyRealtime(
-    List<PoseLandmark> landmarks,
-    double imageWidth,
-    double imageHeight,
-  ) async {
+  Future<ClassificationResult> classifyRealtime() async {
     if (!_isInitialized) {
       throw Exception('모델이 초기화되지 않았습니다');
     }
 
-    // 히스토리에 추가
-    addPoseToHistory(landmarks);
-
-    // 최소 프레임 수 확인
-    if (_poseHistory.length < 3) {
+    // 최소 프레임 수 확인 (더 빠른 반응을 위해 10프레임으로 감소)
+    if (_ntuHistory.length < 10) {
       return ClassificationResult(
         exercise: 'others',
         confidence: 0.0,
@@ -87,35 +108,42 @@ class PoseClassifier {
       );
     }
 
+    // 히스토리를 100프레임으로 조정 (동영상 분류와 동일)
+    List<List<List<double>>> adjustedSequence;
+    final int currentLength = _ntuHistory.length;
+    
+    if (currentLength >= maxHistoryLength) {
+      // 100프레임 이상이면 최근 100프레임 사용
+      adjustedSequence = _ntuHistory.sublist(_ntuHistory.length - maxHistoryLength);
+    } else {
+      // 100프레임 미만이면 현재까지의 시퀀스를 반복하여 패딩 (동영상 분석과 동일한 방식)
+      adjustedSequence = List.from(_ntuHistory);
+      final padCount = maxHistoryLength - currentLength;
+      final source = List.from(_ntuHistory);
+      if (source.isNotEmpty) {
+        for (int i = 0; i < padCount; i++) {
+          adjustedSequence.add(source[i % source.length]);
+        }
+      }
+    }
+
     // 분류 실행
-    return await classify(_poseHistory, imageWidth, imageHeight);
+    return await classify(adjustedSequence);
   }
 
-  /// 포즈 시퀀스 분류
+  /// 포즈 시퀀스 분류 (NTU 포맷 입력)
   Future<ClassificationResult> classify(
-    List<List<PoseLandmark>> sequence,
-    double imageWidth,
-    double imageHeight,
+    List<List<List<double>>> ntuSequence,
   ) async {
     if (!_isInitialized) {
       throw Exception('모델이 초기화되지 않았습니다');
     }
 
     try {
-      // 1. 전처리: MediaPipe → NTU 변환 (T, V, C) 누적
-      List<List<List<double>>> ntuSequence = [];
-      for (var frame in sequence) {
-        var ntuJoints = NTUConverter.mediapipeToNTU(
-          frame,
-          imageWidth,
-          imageHeight,
-        );
-        ntuSequence.add(ntuJoints);
-      }
-
-      // 2. (T,V,C) → (C,T,V,M)
+      // 1. (T,V,C) → (C,T,V,M)
       final Float32List chw = NTUConverter.createModelInput(ntuSequence);
-      // 3. 앱 전달은 (T,V,M,C) 순서로 고정 전달 (네이티브에서 실제 텐서 순서에 맞게 재배열)
+      
+      // 2. 앱 전달은 (T,V,M,C) 순서로 고정 전달 (네이티브에서 실제 텐서 순서에 맞게 재배열)
       const int C = 3, T = 100, V = 25, M = 1;
       final Float32List input = Float32List(T * V * M * C);
       int idx = 0;
@@ -211,12 +239,13 @@ class PoseClassifier {
     try {
       await platform.invokeMethod('closeModel');
       _isInitialized = false;
-      _poseHistory.clear();
+      _ntuHistory.clear();
     } catch (e) {
       print('⚠️ 모델 종료 오류: $e');
     }
   }
 }
+
 
 /// 분류 결과 모델
 class ClassificationResult {

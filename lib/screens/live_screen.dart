@@ -33,6 +33,8 @@ class _LiveScreenState extends State<LiveScreen> with WidgetsBindingObserver {
   double _confidence = 0.0;
   bool _isProcessing = false;
   List<PoseLandmark> _lastLandmarks = [];
+  Timer? _processingTimer;
+  CameraImage? _latestImage;
 
   // 5개 운동 클래스 (others 제외)
   static const List<Map<String, String>> exercises = [
@@ -53,6 +55,7 @@ class _LiveScreenState extends State<LiveScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _processingTimer?.cancel();
     _cameraController?.dispose();
     _poseDetector.dispose();
     _poseClassifier.dispose();
@@ -106,7 +109,7 @@ class _LiveScreenState extends State<LiveScreen> with WidgetsBindingObserver {
 
       _cameraController = CameraController(
         frontCamera,
-        ResolutionPreset.medium,
+        ResolutionPreset.low, // 성능 향상을 위해 낮은 해상도
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.nv21,
       );
@@ -165,50 +168,59 @@ class _LiveScreenState extends State<LiveScreen> with WidgetsBindingObserver {
       return;
     }
 
+    // 카메라 스트림은 최신 이미지만 저장
     _cameraController!.startImageStream((CameraImage image) {
-      if (_isProcessing || !_isRecording) return;
-      _processFrame(image);
+      if (!_isRecording) return;
+      _latestImage = image;
+    });
+
+    // 통합 처리 타이머: 100ms마다 감지 및 분류 실행 (10 FPS)
+    _processingTimer?.cancel();
+    _processingTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
+      if (!_isRecording) {
+        timer.cancel();
+        return;
+      }
+      if (_latestImage != null && !_isProcessing) {
+        _processFrameAndClassify(_latestImage!);
+      }
     });
   }
 
-  Future<void> _processFrame(CameraImage image) async {
+  Future<void> _processFrameAndClassify(CameraImage image) async {
     if (_isProcessing) return;
-
-    setState(() {
-      _isProcessing = true;
-    });
+    _isProcessing = true;
 
     try {
-      // CameraImage를 InputImage로 변환
+      // 1. 이미지 변환
       final inputImage = _convertCameraImage(image);
       if (inputImage == null) {
-        setState(() {
-          _isProcessing = false;
-        });
+        _isProcessing = false;
         return;
       }
 
-      // 포즈 감지
+      // 2. 포즈 감지
       final poses = await _poseDetector.detectPose(inputImage);
       if (poses.isEmpty || poses.first.landmarks.isEmpty) {
-        setState(() {
-          _currentExercise = '포즈를 감지할 수 없습니다';
-          _confidence = 0.0;
-          _isProcessing = false;
-        });
+        _isProcessing = false;
         return;
       }
 
-      // 분류
-      final result = await _poseClassifier.classifyRealtime(
+      // 3. 포즈 히스토리 추가
+      _poseClassifier.processPoseForRealtimeWithFlip(
         poses.first.landmarks.values.toList(),
         image.width.toDouble(),
         image.height.toDouble(),
+        _cameraController!.description.lensDirection == CameraLensDirection.front,
       );
 
-      // 선택한 운동과 일치하는지 확인 + 최근 랜드마크 저장
+      // 4. 실시간 분류 실행
+      final result = await _poseClassifier.classifyRealtime();
+
+      // 5. UI 업데이트 (랜드마크 및 분류 결과 동시)
       if (mounted) {
         setState(() {
+          _lastLandmarks = poses.first.landmarks.values.toList();
           if (result.exercise == _selectedExercise) {
             _currentExercise = '✅ ${_getKoreanExerciseName(result.exercise)}';
             _confidence = result.confidence;
@@ -216,15 +228,12 @@ class _LiveScreenState extends State<LiveScreen> with WidgetsBindingObserver {
             _currentExercise = '❌ ${_getKoreanExerciseName(result.exercise)}';
             _confidence = result.confidence;
           }
-          _lastLandmarks = poses.first.landmarks.values.toList();
         });
       }
     } catch (e) {
-      print('프레임 처리 오류: $e');
+      print('프레임 처리 및 분류 오류: $e');
     } finally {
-      setState(() {
-        _isProcessing = false;
-      });
+      _isProcessing = false;
     }
   }
 
@@ -259,6 +268,7 @@ class _LiveScreenState extends State<LiveScreen> with WidgetsBindingObserver {
   }
 
   void _stopRecording() {
+    _processingTimer?.cancel();
     _cameraController?.stopImageStream();
     setState(() {
       _isRecording = false;

@@ -1,9 +1,12 @@
+import 'package:aifit/utils/memory_monitor.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'screens/home_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+
+  MemoryMonitor.printMemoryUsage('App Start');
 
   // 세로 방향 고정
   SystemChrome.setPreferredOrientations([
