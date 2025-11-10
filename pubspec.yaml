@@ -1,4 +1,4 @@
-name: aifit
+name: aifit_login
 description: "A new Flutter project."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
@@ -54,6 +54,24 @@ dependencies:
   
   # Generate thumbnails from video for frame extraction
   video_thumbnail: ^0.5.3
+
+  # HTTP Client
+  dio: ^5.4.0
+
+  # Secure Storage (토큰 저장)
+  flutter_secure_storage: ^9.0.0
+
+  # State Management
+  provider: ^6.1.1
+
+  # Local Storage
+  shared_preferences: ^2.2.2
+
+  # Email Validation
+  email_validator: ^2.1.17
+
+  # Date Formatting
+  intl: ^0.18.1
 
 dev_dependencies:
   flutter_test:

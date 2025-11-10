@@ -28,8 +28,6 @@ class PoseDetectorService {
   }
 
   /// 이미지에서 포즈 감지
-  /// 
-  /// [inputImage]: ML Kit InputImage
   /// Returns: 감지된 포즈 리스트 (보통 1개)
   Future<List<Pose>> detectPose(InputImage inputImage) async {
     if (!_isInitialized || _poseDetector == null) {

@@ -1,0 +1,51 @@
+services:
+  # MySQL 데이터베이스
+  db:
+    image: mysql:8.0
+    container_name: aifit_mysql
+    restart: always
+    environment:
+      MYSQL_DATABASE: aifit_db
+      MYSQL_ROOT_PASSWORD: aifit1234  # ✅ 이대로 유지 (Django settings.py와 일치)
+      MYSQL_USER: aifit                     # ⚠️ 사용 안함 (Django는 root 사용)
+      MYSQL_PASSWORD: aifit1234            # ⚠️ 사용 안함
+    ports:
+      - "3307:3306"  # ✅ DBeaver 접속용 포트 (3307로 변경 - 기존 MySQL과 충돌 방지)
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Django 백엔드
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aifit_backend
+    restart: always
+    command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
+    volumes:
+      - .:/app  # ✅ 로컬 코드 변경 시 자동 반영
+    ports:
+      - "8000:8000"  # ✅ Flutter 앱 접속용 포트
+    environment:
+      # ⚠️ 아래 환경변수는 .env 파일로 덮어씌워짐 (env_file이 우선순위 높음)
+      - DB_NAME=aifit_db
+      - DB_USER=root                     # ✅ .env에서 root로 변경됨 (관리자 권한)
+      - DB_PASSWORD=aifit1234            # ✅ .env에서 aifit1234로 변경됨
+      - DB_HOST=db                       # ✅ Docker 네트워크 내부 호스트명
+      - DB_PORT=3306
+      - SECRET_KEY=django-insecure-docker-dev-key-change-in-production
+      - DEBUG=True
+    env_file:
+      - .env  # ✅ .env 파일의 값이 위 environment 값보다 우선 적용
+    depends_on:
+      db:
+        condition: service_healthy  # ✅ MySQL이 준비될 때까지 대기
+
+volumes:
+  mysql_data:  # ✅ MySQL 데이터 영구 저장 (docker-compose down 해도 유지)
