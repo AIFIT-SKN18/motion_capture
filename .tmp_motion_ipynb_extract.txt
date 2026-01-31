@@ -1,0 +1,1555 @@
+
+--- cell 6 code ---
+# ==========================
+# MP4 -> NTU .skeleton writer (with FPS/T window control)
+# ==========================
+#!pip install mediapipe opencv-python tqdm
+
+import os, cv2, math, numpy as np
+from pathlib import Path
+from tqdm import tqdm
+import mediapipe as mp
+
+# --------- 사용자 설정 ---------
+ROOT_VIDEOS  = "/content/drive/MyDrive/SAA"     # 클래스/영상.mp4 구조 권장
+OUT_SKELETON = "/content/drive/MyDrive//skeleton"      # .skeleton 저장 폴더
+os.makedirs(OUT_SKELETON, exist_ok=True)
+
+# 파일명 메타 기본값(원본 NTU 네이밍 형식: S###C###P###R###A###.skeleton)
+DEFAULT_SETUP   = 1   # S
+DEFAULT_CAMERA  = 2   # C (xview에서 2,3 카메라가 train에 들어감)
+DEFAULT_SUBJECT = 1   # P
+DEFAULT_REPEAT  = 1   # R
+
+# 감지/프레임 설정
+VIS_THRES  = 0.5
+MAX_FRAMES = None        # None이면 전체, 숫자면 그만큼만(디버그)
+
+# --------- 추가: 타깃 FPS / 길이 / 인원 ---------
+TARGET_FPS = 30          # NEW: NTU는 30fps 기준. 원본 fps 상관없이 이 기준으로 근사 리샘플
+TARGET_T   = 300         # NEW: 최종 프레임 길이(윈도우) 고정. 실시간/파인튜닝이면 30~60 권장
+MAX_PERSON = 1           # NEW: 최대 인원. (MediaPipe Pose는 1인이라 현재 0/1만 나옴)
+
+# --------- MediaPipe → NTU25 매핑 ---------
+def mp_to_ntu25(landmarks):
+    """ landmarks: list of 33 normalized (x,y,visibility) in [0,1]
+        return (25,3) with [x,y,score] in [0,1]
+    """
+    def get(i):
+        lm = landmarks[i]
+        return np.array([lm.x, lm.y, getattr(lm, "visibility", 1.0)], dtype=np.float32)
+    def mid(a,b): return (a+b)/2.0
+
+    # key indices
+    LSH, RSH = get(11), get(12)
+    LHP, RHP = get(23), get(24)
+    L_EL, R_EL = get(13), get(14)
+    L_WR, R_WR = get(15), get(16)
+    L_ID, R_ID = get(19), get(20)
+    L_TB, R_TB = get(21), get(22)
+    L_KN, R_KN = get(25), get(26)
+    L_AN, R_AN = get(27), get(28)
+    L_FI, R_FI = get(31), get(32)
+    SHO = mid(LSH, RSH)  # spine shoulder
+    HIP = mid(LHP, RHP)  # spine base
+    NEK = SHO            # neck approx
+    HED = get(0)         # head ~ nose
+
+    J = np.stack([
+        HIP,           # 0 spine base
+        (HIP+SHO)/2.0, # 1 spine mid (approx)
+        NEK,           # 2 neck
+        HED,           # 3 head
+        LSH, L_EL, L_WR, L_ID,       # 4..7
+        RSH, R_EL, R_WR, R_ID,       # 8..11
+        LHP, L_KN, L_AN, L_FI,       # 12..15
+        RHP, R_KN, R_AN, R_FI,       # 16..19
+        SHO, L_ID, L_TB, R_ID, R_TB  # 20..24
+    ], axis=0).astype(np.float32)
+
+    J[:, :2] = np.clip(J[:, :2], 0.0, 1.0)
+    J[:, 2]  = np.clip(J[:, 2], 0.0, 1.0)  # score
+    return J  # (25,3)
+
+# --------- .skeleton 파일 작성기 ---------
+def write_ntu_skeleton(out_path, frames_joint):
+    """
+    frames_joint: list of dict per frame:
+      - if no body: {'numBody': 0}
+      - if body:    {'numBody': 1, 'J': (25,3) normalized}
+    Writes NTU skeleton text format compatible with read_skeleton_filter.
+    """
+    with open(out_path, "w") as f:
+        f.write(f"{len(frames_joint)}\n")  # numFrame
+        for fr in frames_joint:
+            nbody = min(fr.get("numBody", 0), MAX_PERSON)   # NEW: MAX_PERSON 적용
+            f.write(f"{nbody}\n")
+            if nbody == 0:
+                continue
+            # ---- bodyInfo 10 fields
+            bodyID = 1; clipedEdges=0; hLC=1; hLS=2; hRC=1; hRS=2; isR=0; leanX=0; leanY=0; tS=2
+            f.write(f"{bodyID} {clipedEdges} {hLC} {hLS} {hRC} {hRS} {isR} {leanX} {leanY} {tS}\n")
+            # ---- numJoint
+            f.write("25\n")
+            J = fr["J"]  # (25,3)
+            for j in range(25):
+                x, y, score = float(J[j,0]), float(J[j,1]), float(J[j,2])
+                z = 0.0
+                depthX, depthY = x, y
+                colorX, colorY = x, y
+                oW, oX, oY, oZ = 1.0, 0.0, 0.0, 0.0
+                tState = 2.0 if score >= VIS_THRES else 1.0
+                f.write(f"{x} {y} {z} {depthX} {depthY} {colorX} {colorY} {oW} {oX} {oY} {oZ} {tState}\n")
+
+# --------- FPS 리샘플/길이 맞춤 유틸 ---------
+def resample_by_fps(frames, src_fps, dst_fps):
+    """원본 프레임 리스트를 dst_fps에 맞게 인덱스 리샘플"""
+    if src_fps is None or src_fps <= 0:  # CHANGED: fps 불명 시 그대로
+        return frames
+    n = len(frames)
+    if n == 0: return frames
+    dur = n / float(src_fps)
+    n_dst = max(1, int(round(dur * float(dst_fps))))
+    idx = np.linspace(0, n-1, num=n_dst).round().astype(int)
+    idx = np.clip(idx, 0, n-1)
+    return [frames[i] for i in idx]
+
+def fit_to_length(frames, T):
+    """길이가 T가 되도록 잘라내기/보간/패딩(0-body)"""
+    n = len(frames)
+    if n == 0:
+        return [{"numBody": 0} for _ in range(T)]
+    if n == T:
+        return frames
+    if n > T:
+        # 균등 샘플링으로 T개 선택
+        idx = np.linspace(0, n-1, num=T).round().astype(int)
+        return [frames[i] for i in idx]
+    # pad 0-body
+    pad = [{"numBody": 0} for _ in range(T - n)]
+    return frames + pad
+
+# --------- 비디오 -> frames_joint ---------
+mp_pose = mp.solutions.pose
+
+def video_to_skeleton_frames(video_path):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return [], None  # CHANGED: fps도 반환
+
+    src_fps = cap.get(cv2.CAP_PROP_FPS) or 0.0  # CHANGED
+    frames = []
+    with mp_pose.Pose(static_image_mode=False, model_complexity=1,
+                      enable_segmentation=False,
+                      min_detection_confidence=0.5,
+                      min_tracking_confidence=0.5) as pose:
+        n = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok: break
+            n += 1
+            if MAX_FRAMES and n > MAX_FRAMES: break
+
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            res = pose.process(rgb)
+
+            if res.pose_landmarks:
+                J = mp_to_ntu25(res.pose_landmarks.landmark)  # (25,3)
+                mean_vis = float(J[:,2].mean())
+                if mean_vis >= 0.05:
+                    frames.append({"numBody": 1, "J": J})
+                else:
+                    frames.append({"numBody": 0})
+            else:
+                frames.append({"numBody": 0})
+    cap.release()
+    return frames, float(src_fps)
+
+# --------- 클래스→AID 매핑 만들기 ---------
+video_paths = sorted([p for p in Path(ROOT_VIDEOS).rglob("*.mp4")])
+if not video_paths:
+    raise SystemExit(f"No mp4 files under {ROOT_VIDEOS}")
+
+classes = sorted({p.parent.name for p in video_paths})
+cls2aid = {c:i+1 for i,c in enumerate(classes)}  # 1..K
+print("Class -> AID mapping:", cls2aid)
+
+# --------- 변환 실행 ---------
+for vpath in tqdm(video_paths, desc="Converting"):
+    cls = vpath.parent.name
+    A = cls2aid[cls]           # action id 1..K
+    S = DEFAULT_SETUP
+    C = DEFAULT_CAMERA
+    P = DEFAULT_SUBJECT
+    R = DEFAULT_REPEAT
+
+    base = vpath.stem
+    out_name = f"S{S:03d}C{C:03d}P{P:03d}R{R:03d}A{A:03d}_{base}.skeleton"
+    out_path = str(Path(OUT_SKELETON)/out_name)
+
+    frames, src_fps = video_to_skeleton_frames(str(vpath))
+    if len(frames) == 0:
+        # 빈 프레임이면 numFrame=0 파일 생성 (원하면 skip로 바꿔도 됨)
+        with open(out_path, "w") as f: f.write("0\n")
+        continue
+
+    # NEW: 타깃 FPS로 리샘플 → 타깃 길이(TARGET_T)로 맞춤
+    frames = resample_by_fps(frames, src_fps, TARGET_FPS)
+    frames = fit_to_length(frames, TARGET_T)
+
+    write_ntu_skeleton(out_path, frames)
+
+print(f"Done. Saved .skeleton files to: {OUT_SKELETON}")
+print("샘플 파일 예시:", sorted(os.listdir(OUT_SKELETON))[:5])
+
+
+--- cell 10 code ---
+!python -m data_gen.gen_ntu_batch \
+  --input "/content/drive/MyDrive/Toyproject2/single_npy/skeleton" \
+  --out_dir "/content/drive/MyDrive/Toyproject2/single_npy/skeleton/npy_new" \
+  --label_mode fixed \
+  --label 4 \
+  --save_label_per_file \
+  --aggregate_label "/content/drive/MyDrive/Toyproject2/single_npy/skeleton.pkl"
+
+
+--- cell 14 code ---
+from pathlib import Path
+import numpy as np, hashlib, os, time
+
+ROOT = Path("/content/drive/MyDrive/single_npy/npy")
+ROUND_ND = None        # 예: 5 -> 소수 5자리 반올림 후 비교(근사 일치). 정확 비교는 None
+FILTER_PATTERN = "*.npy"  # 예) "*_data_joint.npy" 로 좁힐 수 있음
+DRY_RUN = False         # 먼저 예행연습 후, 실제 삭제하려면 False 로
+
+def array_hash(npy_path: Path, nd=None):
+    x = np.load(npy_path, mmap_mode="r")
+    if nd is not None:
+        a = np.round(np.asarray(x), nd)  # dtype 무관하게 반올림 적용
+        a = np.ascontiguousarray(a)
+    else:
+        # nd=None이면 정확 동일성(바이트) 비교
+        a = np.ascontiguousarray(np.asarray(x))
+    return hashlib.sha256(a.tobytes()).hexdigest()[:16]
+
+def is_flip_name(p: Path) -> bool:
+    # 파일명에 "_flip" 토큰이 있으면 플립으로 간주
+    return "_flip" in p.name
+
+def label_path_of(npy_path: Path) -> Path:
+    # *_data_joint.npy -> *_label.pkl 로 매핑(필요 없으면 수정/삭제)
+    name = npy_path.name
+    if name.endswith("_data_joint.npy"):
+        return npy_path.with_name(name.replace("_data_joint.npy", "_label.pkl"))
+    # 일반 규칙이 아니면 None 반환
+    return npy_path.with_suffix(".pkl")  # 혹시 다른 규칙이면 적절히 수정
+
+# 1) 해시 그룹 만들기
+groups = {}
+candidates = sorted(ROOT.rglob(FILTER_PATTERN))
+for npy in candidates:
+    try:
+        h = array_hash(npy, nd=ROUND_ND)
+    except Exception as e:
+        print(f"[WARN] 해시 실패: {npy} -> {e}")
+        continue
+    groups.setdefault(h, []).append(npy)
+
+dup = {h:paths for h,paths in groups.items() if len(paths) > 1}
+
+print(f"[INFO] 값기반 중복 그룹 수 (nd={ROUND_ND}): {len(dup)}")
+# 미리 5개만 샘플 출력
+for h,paths in list(dup.items())[:5]:
+    print(f"\n[dup hash={h}] size={len(paths)}")
+    for p in paths[:5]:
+        print("  ", p)
+    if len(paths) > 5:
+        print("   ...")
+
+# 2) 중복 그룹 처리 정책:
+#   - 플립이 아닌 파일을 우선 보존
+#   - 동일 조건이면 수정시각이 가장 오래된(작은 mtime) 파일 보존
+#   - 나머지는 삭제(라벨 .pkl 있으면 같이 삭제)
+delete_targets = []
+keep_map = {}  # h -> kept path
+
+for h, paths in dup.items():
+    # 정렬: (플립 여부, mtime)
+    # 플립이 아닌 것이 우선 -> is_flip_name=False(0)이 True(1)보다 앞
+    paths_sorted = sorted(paths, key=lambda p: (is_flip_name(p), p.stat().st_mtime))
+    keep = paths_sorted[0]
+    keep_map[h] = keep
+    victims = paths_sorted[1:]
+
+    print(f"\n[GROUP {h}] keep -> {keep}")
+    for v in victims:
+        delete_targets.append(v)
+        print("  del ->", v)
+
+print(f"\n[INFO] 삭제 대상 총 {len(delete_targets)}개 (DRY_RUN={DRY_RUN})")
+
+# 3) 실제 삭제 수행(+ 라벨 동반 삭제)
+def safe_unlink(p: Path):
+    try:
+        if not DRY_RUN and p.exists():
+            p.unlink()
+        return True, None
+    except Exception as e:
+        return False, e
+
+deleted, failed = 0, 0
+for v in delete_targets:
+    ok, err = safe_unlink(v)
+    if ok:
+        print("[DEL] ", v)
+        deleted += (0 if DRY_RUN else 1)
+    else:
+        print("[ERR] 삭제 실패:", v, err)
+        failed += 1
+
+    # 라벨 동반 삭제 시도 (규칙과 다르면 수정하세요)
+    lbl = label_path_of(v)
+    if lbl and lbl.exists():
+        ok, err = safe_unlink(lbl)
+        if ok:
+            print("       [DEL label] ", lbl)
+        else:
+            print("       [ERR] 라벨 삭제 실패:", lbl, err)
+
+print(f"\n[DONE] 삭제 완료. deleted={deleted} failed={failed} (DRY_RUN={DRY_RUN})")
+
+# 4) 보너스: 남은 파일 개수 집계
+left = sum(1 for _ in ROOT.rglob(FILTER_PATTERN))
+print(f"[INFO] 현재 남은 파일 수: {left}")
+
+
+--- cell 16 markdown ---
+- Train/Test split
+
+--- cell 17 code ---
+# === Multiclass stratified 8:2 split by *joint npy file* (robust label fallback, AGCN-safe) ===
+from pathlib import Path
+import numpy as np, pickle, random, json, re, sys
+from collections import Counter
+
+# -------------------- 설정 --------------------
+SRC_ROOT  = Path("/content/drive/MyDrive/Toyproject2/aug")
+OUT_ROOT  = Path("/content/drive/MyDrive/fine-tuning-2")
+# aug_dataset_new 와 ‘동일한 하위 폴더 구조’를 갖는 원본 라벨 루트
+MIRROR_LABEL_ROOT = Path("/content/drive/MyDrive/Toyproject2/npy_data")
+# 필요시 추가 라벨 디렉토리들
+EXTRA_LABEL_DIRS = [
+    # 개별 폴더를 더 지정하고 싶으면 여기에 추가
+]
+TRAIN_DIR = OUT_ROOT / "train"
+TEST_DIR  = OUT_ROOT / "test"
+
+RATIO = 0.7                # train 비율
+SEED  = 42
+ADD_Y_IN_FILENAME = True    # 저장 이름에 _y{label} 부착
+VALID_LABELS = set(range(6))  # 유효 라벨 값 (0..5) ← 필요시 수정
+EXPECT_V_SET = {25, 18}       # 허용 관절 수
+FORCE_M = 2                   # 저장 M 크기 (부족하면 0 padding)
+GLOB_PATTERN = "*_data_joint*.npy"  # AGCN 후처리 포함
+
+# 라벨이 다른 폴더에 있다면 여기에 추가
+EXTRA_LABEL_DIRS = [
+    # "/content/drive/MyDrive/motion seungok/fine-tuning_dataset/npy_data",  # 예시
+]
+
+# -------------------- 유틸: prefix 복원 & 라벨 탐색 --------------------
+_SUFFIX_DATA_JOINT_RX = re.compile(r'(?:_data_joint(?:_[A-Za-z0-9]+)?)$')
+_COPY_RX              = re.compile(r'(?:_copy\d+)$')
+_AUG_RX               = re.compile(r'(?:_aug_[^_]+)$')
+_SINGLE_AUG_RX        = re.compile(r'(?:_(?:ypr|yaw|pitch|roll|flip))$')  # 필요시 확장
+
+def normalize_prefix_from_joint_name(jpath: Path) -> str:
+    """
+    예) S001..._squat7_ypr_copy08_data_joint_AGCN.npy  ->  S001..._squat7
+    제거 순서: _data_joint(_TAG)? -> _copyNN -> _aug_* -> _(ypr|yaw|pitch|roll|flip)
+    """
+    s = jpath.stem
+    s = _SUFFIX_DATA_JOINT_RX.sub('', s)
+    s = _COPY_RX.sub('', s)
+    s = _AUG_RX.sub('', s)
+    s = _SINGLE_AUG_RX.sub('', s)
+    return s
+
+def find_label_for_joint(jpath: Path, debug=False):
+    """
+    - aug_dataset_new 안의 joint 파일에 대해:
+      1) 같은 폴더에서 prefix_label*.pkl 찾기
+      2) MIRROR_LABEL_ROOT/<동일한 하위폴더>/ 에서 prefix_label*.pkl 찾기  ← ★추가
+      3) EXTRA_LABEL_DIRS 에서도 찾기
+      4) direct replace (_data_joint_→_label_) 도 한 번 시도
+    """
+    prefix = normalize_prefix_from_joint_name(jpath)
+    d = jpath.parent
+    candidates = []
+
+    # 0) direct replace (호환성)
+    direct = Path(str(jpath).replace("_data_joint_", "_label_")).with_suffix(".pkl")
+    candidates.append(direct)
+
+    # 1) same dir
+    candidates.append(d / f"{prefix}_label.pkl")
+    candidates += sorted(d.glob(f"{prefix}_label*.pkl"))
+
+    # 2) mirror dir (aug_dataset_new 하위 경로를 npy_data 로 치환)
+    try:
+        rel = jpath.relative_to(SRC_ROOT).parent  # 예) dumbbell_squat/
+        mirror_dir = MIRROR_LABEL_ROOT / rel
+        candidates.append(mirror_dir / f"{prefix}_label.pkl")
+        candidates += sorted(mirror_dir.glob(f"{prefix}_label*.pkl"))
+    except Exception:
+        pass  # relative_to 실패 시 패스
+
+    # 3) extra dirs
+    for extra in EXTRA_LABEL_DIRS:
+        extra = Path(extra)
+        candidates.append(extra / f"{prefix}_label.pkl")
+        candidates += sorted(extra.glob(f"{prefix}_label*.pkl"))
+
+    # 유일화
+    seen, uniq = set(), []
+    for p in candidates:
+        s = str(p)
+        if s in seen:
+            continue
+        seen.add(s); uniq.append(p)
+
+    for p in uniq:
+        if p.exists():
+            if debug:
+                print(f"[LABEL] {jpath.name} -> {p}")
+            return p
+
+    if debug:
+        print(f"[DEBUG] label candidates (first 10) for {jpath.name}:")
+        for c in uniq[:10]:
+            print("   -", c)
+    return None
+
+# -------------------- 라벨 로더/파서 --------------------
+def robust_load_label(path: Path):
+    p = Path(path)
+    # 1) pickle
+    try:
+        with open(p, "rb") as f:
+            return pickle.load(f)
+    except Exception:
+        pass
+    # 2) json
+    try:
+        with open(p, "r", encoding="utf-8-sig") as f:
+            return json.load(f)
+    except Exception:
+        pass
+    # 3) txt (줄당 int)
+    try:
+        vals = []
+        with open(p, "r", encoding="utf-8-sig") as f:
+            for ln in f:
+                t = ln.strip()
+                if t:
+                    try: vals.append(int(t.split()[0]))
+                    except: pass
+        if vals:
+            return {"label_index": vals}
+    except Exception:
+        pass
+    return None
+
+def get_y(L, k: int, K: int):
+    if L is None: return None
+    # dict
+    if isinstance(L, dict):
+        if "label_index" in L:
+            li = L["label_index"]
+            if isinstance(li, (list, tuple, np.ndarray)) and len(li)>0:
+                try: return int(li[min(k, len(li)-1)])
+                except: return None
+        if "label" in L:
+            lv = L["label"]
+            v = lv[min(k, len(lv)-1)] if isinstance(lv, (list, tuple, np.ndarray)) and len(lv)>0 else lv
+            try: return int(v)
+            except:
+                try: return int(str(v))
+                except: return None
+        return None
+    # tuple
+    if isinstance(L, tuple) and len(L)==2:
+        _, lab = L
+        if isinstance(lab, (list, tuple, np.ndarray)) and len(lab)>0:
+            try: return int(lab[min(k, len(lab)-1)])
+            except: return None
+        try: return int(lab)
+        except: return None
+    # list/ndarray
+    if isinstance(L, (list, tuple, np.ndarray)) and len(L)>0:
+        try: return int(L[min(k, len(L)-1)])
+        except: return None
+    # scalar
+    if isinstance(L, (int, np.integer, str)):
+        try: return int(L)
+        except: return None
+    return None
+
+def single_label_dict(L, k: int, K: int) -> dict:
+    if isinstance(L, dict):
+        out = {}
+        if "label_index" in L:
+            li = L["label_index"]
+            if isinstance(li, (list, tuple, np.ndarray)) and len(li)>0:
+                out["label_index"] = [int(li[min(k, len(li)-1)])]
+        if "label" in L:
+            lv = L["label"]
+            if isinstance(lv, (list, tuple, np.ndarray)) and len(lv)>0:
+                out["label"] = [lv[min(k, len(lv)-1)]]
+            else:
+                out["label"] = [lv]
+        if out: return out
+    vy = get_y(L, k, K)
+    return {"label_index": [int(vy) if vy is not None else 0]}
+
+# -------------------- 입력 .npy 정규화 --------------------
+def to_NCTVM_minibatch(X, expect_v=EXPECT_V_SET, force_M=FORCE_M):
+    """
+    X: np.ndarray
+      - (N,C,T,V,M) 또는 (C,T,V,M) 또는 기타 혼선
+    반환: (K, 3, T, V, M>=force_M)
+      - 여기서 K는 파일 내부 샘플 수(=N), 저장은 슬라이스별 (1,3,T,V,M)
+    """
+    arr = np.asarray(X)
+    # 1) 이미 5D이면 (N,C,T,V,M) 가정
+    if arr.ndim == 5:
+        N,C,T,V,M = arr.shape
+        if C != 3:
+            # 채널이 앞이 아닐 수 있으니 재정렬 시도
+            # C=3 축을 찾아 (N,C,T,V,M) 재배치
+            shape = arr.shape
+            if 3 not in shape:
+                raise ValueError(f"C=3 axis not found: {shape}")
+            c_ax = list(range(arr.ndim))[list(shape).index(3)]
+            # 남은 축 중 가장 큰 걸 T, V는 expect 우선
+            other = [i for i in range(5) if i != c_ax]
+            t_ax = max(other, key=lambda i: shape[i])
+            v_ax = None
+            for i in other:
+                if i == t_ax: continue
+                if shape[i] in expect_v:
+                    v_ax = i; break
+            if v_ax is None:
+                v_ax = [i for i in other if i != t_ax][0]
+            nm_axes = [i for i in range(5) if i not in (c_ax,t_ax,v_ax)]
+            # nm_axes를 N,M으로
+            perm = [nm_axes[0], c_ax, t_ax, v_ax, nm_axes[-1]]
+            arr = np.transpose(arr, perm)
+            N,C,T,V,M = arr.shape
+    # 2) 4D면 (C,T,V,M) 가정 → N=1 추가
+    elif arr.ndim == 4:
+        C,T,V,M = arr.shape
+        if C != 3:
+            # C=3 축 찾아 (C,T,V,M)로
+            shape = arr.shape
+            if 3 not in shape:
+                raise ValueError(f"C=3 axis not found: {shape}")
+            c_ax = list(range(4))[list(shape).index(3)]
+            other = [i for i in range(4) if i != c_ax]
+            t_ax = max(other, key=lambda i: shape[i])
+            v_ax = None
+            for i in other:
+                if i == t_ax: continue
+                if shape[i] in expect_v:
+                    v_ax = i; break
+            if v_ax is None:
+                v_ax = [i for i in other if i != t_ax][0]
+            m_ax = [i for i in range(4) if i not in (c_ax,t_ax,v_ax)][0]
+            arr = np.transpose(arr, (c_ax, t_ax, v_ax, m_ax))
+            C,T,V,M = arr.shape
+        arr = arr[None, ...]  # N=1
+        N,C,T,V,M = arr.shape
+    else:
+        # 그 외는 squeeze 후 재추정
+        arr = np.squeeze(arr)
+        if arr.ndim < 3:
+            raise ValueError(f"Unsupported shape after squeeze: {arr.shape}")
+        # C=3 축 찾기 -> (C,T,V,[N?],[M?]) 정렬 후 (N,C,T,V,M)
+        shape = arr.shape
+        if 3 not in shape:
+            raise ValueError(f"C=3 axis not found: {shape}")
+        c_ax = list(range(arr.ndim))[list(shape).index(3)]
+        other = [i for i in range(arr.ndim) if i != c_ax]
+        t_ax = max(other, key=lambda i: shape[i])
+        v_ax = None
+        for i in other:
+            if i == t_ax: continue
+            if shape[i] in expect_v:
+                v_ax = i; break
+        if v_ax is None:
+            cand = [i for i in other if i != t_ax]
+            v_ax = cand[0]
+        nm_axes = [i for i in range(arr.ndim) if i not in (c_ax,t_ax,v_ax)]
+        perm = [c_ax, t_ax, v_ax] + nm_axes
+        arr = np.transpose(arr, perm)
+        C,T,V,*nm = arr.shape
+        if len(nm) == 0: N,M = 1,1
+        elif len(nm) == 1: N,M = nm[0],1
+        else:
+            N, M = nm[0], nm[-1]
+        arr = arr.reshape(C,T,V,N,M).transpose(3,0,1,2,4)
+        N,C,T,V,M = arr.shape
+
+    # V 검사
+    if V not in EXPECT_V_SET:
+        raise ValueError(f"Unexpected V={V} in array {arr.shape}")
+
+    # M padding
+    if M < force_M:
+        pad = np.zeros((N, C, T, V, force_M - M), dtype=arr.dtype)
+        arr = np.concatenate([arr, pad], axis=-1)
+
+    return arr.astype(np.float32, copy=False)  # (N,3,T,V,>=M)
+
+# -------------------- 파일 엔트리 구성 --------------------
+file_entries = []  # dict(joint_path, label_path, K, base, y_file)
+
+all_joints = sorted(SRC_ROOT.rglob(GLOB_PATTERN))
+print(f"[INFO] joint npy candidates: {len(all_joints)}")
+if not all_joints:
+    print("[HINT] SRC_ROOT 또는 GLOB_PATTERN을 확인하세요:", SRC_ROOT, GLOB_PATTERN)
+
+miss = 0
+for j in all_joints:
+    l = find_label_for_joint(j, debug=False)
+    if l is None:
+        # 디버그 몇 개만 자세히 보여주기
+        if miss < 8:
+            _ = find_label_for_joint(j, debug=True)
+        print(f"[WARN] label not found (fallback failed) -> skip: {j.name}")
+        miss += 1
+        continue
+    try:
+        Xj = np.load(j, mmap_mode="r")
+        Xn = to_NCTVM_minibatch(Xj)  # (N,3,T,V,M>=2)
+        K  = Xn.shape[0]
+        C,T,V,M = Xn.shape[1:5]
+        L  = robust_load_label(l)
+    except Exception as e:
+        print(f"[WARN] load/normalize fail {j.name}: {e}")
+        continue
+
+    # 라벨 수집
+    labels = []
+    for k in range(K):
+        yk = get_y(L, k, K)
+        if yk is not None and yk in VALID_LABELS:
+            labels.append(int(yk))
+    if not labels:
+        print(f"[WARN] no valid label in file -> skip: {j.name}")
+        continue
+
+    # 대표 라벨: 최빈값(동률시: 등장수 → 라벨값 내림차순)
+    cnt = Counter(labels)
+    y_file = max(cnt.items(), key=lambda t:(t[1], -t[0]))[0]
+    file_entries.append(dict(joint_path=j, label_path=l, K=K, base=j.stem, y=y_file))
+
+print(f"[INFO] files collected: {len(file_entries)}")
+if not file_entries:
+    sys.exit("분할할 joint npy 파일이 없습니다. EXTRA_LABEL_DIRS를 점검하세요.")
+
+# -------------------- Stratified 8:2 split (파일 단위) --------------------
+rng = random.Random(SEED)
+by_cls = {}
+for e in file_entries:
+    by_cls.setdefault(e["y"], []).append(e)
+
+train_files, test_files = [], []
+for y, bucket in by_cls.items():
+    rng.shuffle(bucket)
+    n = len(bucket)
+    n_tr = int(round(n * RATIO))
+    if n > 1 and (n_tr == 0 or n_tr == n):
+        n_tr = max(1, min(n-1, n_tr))
+    train_files.extend(bucket[:n_tr])
+    test_files .extend(bucket[n_tr:])
+    print(f"  class {y}: total_files={n} -> train_files={n_tr}, test_files={n-n_tr}")
+
+rng.shuffle(train_files); rng.shuffle(test_files)
+print(f"[INFO] train_files={len(train_files)}, test_files={len(test_files)}")
+
+# -------------------- 저장 --------------------
+def ensure_split_dirs(root: Path):
+    (root/"joint").mkdir(parents=True, exist_ok=True)
+    (root/"label").mkdir(parents=True, exist_ok=True)
+
+def save_file_entry(e, root: Path):
+    y = e["y"]; K = e["K"]; base = e["base"]
+    Xj = to_NCTVM_minibatch(np.load(e["joint_path"], mmap_mode="r"))  # (N,3,T,V,M)
+    L  = robust_load_label(e["label_path"])
+
+    for k in range(K):
+        save_base = base if ("_copy" in base or K==1) else f"{base}_copy{k:02d}"
+        joint_name = f"{save_base}_y{y}.npy" if ADD_Y_IN_FILENAME else f"{save_base}.npy"
+        label_name = f"{save_base}_y{y}.pkl" if ADD_Y_IN_FILENAME else f"{save_base}.pkl"
+
+        # (1,3,T,V,M)로 슬라이스 저장
+        np.save(root/"joint"/joint_name, Xj[k:k+1])
+
+        # k번째 라벨 안전 추출, 유효성 체크(범위 밖이면 대표 y로 대체)
+        Lk = single_label_dict(L, k, K)
+        vy = None
+        try:
+            if isinstance(Lk, dict):
+                if "label_index" in Lk: vy = int(Lk["label_index"][0])
+                elif "label" in Lk:     vy = int(Lk["label"][0])
+        except: vy = None
+        if vy is None or vy not in VALID_LABELS:
+            Lk = {"label_index": [int(y)]}
+
+        with open(root/"label"/label_name, "wb") as f:
+            pickle.dump(Lk, f)
+
+ensure_split_dirs(TRAIN_DIR); ensure_split_dirs(TEST_DIR)
+for e in train_files: save_file_entry(e, TRAIN_DIR)
+for e in test_files : save_file_entry(e, TEST_DIR)
+
+# -------------------- 요약 --------------------
+def summarize(root: Path):
+    lj = list((root/"joint").glob("*.npy"))
+    ll = list((root/"label").glob("*.pkl"))
+    print(f"[{root.name}] joint={len(lj)} label={len(ll)}")
+
+summarize(TRAIN_DIR)
+summarize(TEST_DIR)
+print("[DONE]")
+
+
+--- cell 19 code ---
+from pathlib import Path
+from glob import glob
+from collections import Counter
+import re, pickle, numpy as np
+
+data_dir  = Path("/content/drive/MyDrive/Toyproject2/fine-tuning-2/test/joint")
+label_dir = Path("/content/drive/MyDrive/Toyproject2/fine-tuning-2/test/label")  # sidecar 없으면 "" 로 두세요
+pattern   = "*.npy"
+
+def read_label_from_pkl(p):
+    import pickle, numpy as np
+    with open(p,"rb") as f: L = pickle.load(f)
+    if isinstance(L,dict):
+        if "label_index" in L and len(L["label_index"])>0: return int(L["label_index"][0])
+        for k in ("label","y","class","target","idx","id"):
+            if k in L:
+                v=L[k]; return int(v[0] if isinstance(v,(list,tuple,np.ndarray)) else v)
+    if isinstance(L,(list,tuple,np.ndarray)) and len(L)>0: return int(L[0])
+    return int(L)
+
+def get_label(npy_path, label_dir):
+    if label_dir:
+        base = npy_path.stem; base2 = base.replace("_data_joint","")
+        for cand in (label_dir/f"{base}.pkl", label_dir/f"{base2}.pkl"):
+            if cand.exists(): return read_label_from_pkl(cand)
+    m = re.search(r"_y(\d+)(?=\.npy$)", npy_path.name)
+    if m: return int(m.group(1))
+    raise FileNotFoundError("sidecar도 없고 파일명에서도 라벨 못 찾음")
+
+files = sorted(data_dir.glob(pattern))
+print("소스 NPY 개수:", len(files))
+counts, missing = Counter(), []
+for p in files[:500000]:
+    try:
+        y = get_label(p, label_dir if str(label_dir) else None)
+        counts[y]+=1
+    except Exception as e:
+        missing.append((p.name, str(e)))
+print("클래스 분포:", dict(counts))
+if missing:
+    print("라벨 못 찾은 파일 예시(최대 10):")
+    for nm,err in missing[:10]: print(" -", nm, "|", err)
+
+
+--- cell 20 code ---
+# --- 설정 ---
+SRC_DATA = "/content/drive/MyDrive/Toyproject2/fine-tuning-2/test/joint"
+SRC_LABEL= "/content/drive/MyDrive/Toyproject2/fine-tuning-2/test/label"   # sidecar 없으면 "" 로 두세요
+DST_DATA = "/content/drive/MyDrive/Toyproject2/fine-tuning-2/test_bal1/joint"
+DST_LABEL= "/content/drive/MyDrive/Toyproject2/fine-tuning-2/test_bal1/label"
+PATTERN  = "*.npy"
+BALANCE_TO =56        # ← 여기만 조절 (예: 400 또는 496)
+SEED = 42
+
+import os, re, pickle, numpy as np
+from pathlib import Path
+from glob import glob
+from collections import Counter, defaultdict
+from tqdm import tqdm
+
+np.random.seed(SEED)
+
+# --- 유틸: 라벨 읽기 ---
+def read_label_from_pkl(p):
+    with open(p, "rb") as f: L = pickle.load(f)
+    if isinstance(L, dict):
+        if "label_index" in L and len(L["label_index"])>0: return int(L["label_index"][0])
+        for k in ("label","y","class","target","idx","id"):
+            if k in L:
+                v=L[k]; return int(v[0] if isinstance(v,(list,tuple,np.ndarray)) else v)
+    if isinstance(L,(list,tuple,np.ndarray)) and len(L)>0: return int(L[0])
+    return int(L)
+
+def get_label(npy_path: Path, label_dir: str|Path|None):
+    label_dir = Path(label_dir) if label_dir else None
+    if label_dir:
+        base = npy_path.stem; base2 = base.replace("_data_joint","")
+        for cand in (label_dir/f"{base}.pkl", label_dir/f"{base2}.pkl"):
+            if cand.exists(): return read_label_from_pkl(cand)
+    m = re.search(r"_y(\d+)(?=\.npy$)", npy_path.name)
+    if m: return int(m.group(1))
+    raise FileNotFoundError(f"라벨 없음: {npy_path.name}")
+
+# --- 윈도우/증강 ---
+def crop_or_pad_T(x, out_T=300):
+    C,T,V,M = x.shape
+    if T==out_T: return x
+    if T>out_T:
+        start = np.random.randint(0, T-out_T+1); return x[:, start:start+out_T]
+    y = np.zeros((C,out_T,V,M), dtype=x.dtype)
+    start = np.random.randint(0, out_T-T+1); y[:, start:start+T] = x; return y
+
+def temporal_shift(x, max_shift=6):
+    C,T,V,M = x.shape; s = np.random.randint(-max_shift, max_shift+1)
+    y = np.zeros_like(x)
+    if s>0: y[:, s:] = x[:, :T-s]
+    elif s<0: y[:, :T+s] = x[:, -s:]
+    else: y[:] = x
+    return y
+
+def temporal_speed_nearest(x, rate_min=0.95, rate_max=1.05, out_T=300):
+    C,T,V,M = x.shape; rate = np.random.uniform(rate_min, rate_max)
+    L = max(1, int(round(T*rate)))
+    idx = np.clip(np.round(np.linspace(0, T-1, num=L)).astype(int), 0, T-1)
+    y = x[:, idx, :, :]
+    if y.shape[1] < out_T:
+        z = np.zeros((C,out_T,V,M), dtype=y.dtype); z[:, :y.shape[1]] = y; y = z
+    elif y.shape[1] > out_T:
+        y = y[:, :out_T]
+    return y
+
+def rotate_2d(x, max_deg=8):
+    th = np.deg2rad(np.random.uniform(-max_deg, max_deg))
+    R = np.array([[np.cos(th), -np.sin(th)],
+                  [np.sin(th),  np.cos(th)]], dtype=x.dtype)
+    y = x.copy(); xy = y[:2].reshape(2, -1)
+    y[:2] = (R @ xy).reshape(2, x.shape[1], x.shape[2], x.shape[3]); return y
+
+def flip_x(x):
+    y = x.copy(); y[0] = -y[0]; return y
+
+def scale_xy(x, smin=0.97, smax=1.03):
+    s = np.random.uniform(smin, smax); y = x.copy(); y[:2] *= s; return y
+
+def gaussian_jitter(x, sigma=0.003):
+    return x + np.random.normal(0, sigma, size=x.shape).astype(x.dtype)
+
+def joint_dropout(x, p=0.03):
+    y = x.copy(); mask = (np.random.rand(*x.shape) < p); y[mask] = 0.0; return y
+
+def strong_augment(x, out_T=300):
+    x = crop_or_pad_T(x, out_T=out_T)
+    if np.random.rand()<0.7: x = temporal_shift(x, 6)
+    if np.random.rand()<0.5: x = temporal_speed_nearest(x, 0.95, 1.05, out_T=out_T)
+    if np.random.rand()<0.5: x = rotate_2d(x, 8)
+    if np.random.rand()<0.5: x = flip_x(x)
+    if np.random.rand()<0.5: x = scale_xy(x, 0.97, 1.03)
+    if np.random.rand()<0.7: x = gaussian_jitter(x, 0.003)
+    if np.random.rand()<0.2: x = joint_dropout(x, 0.03)
+    return x
+
+def ensure_ctvm(arr):
+    x = arr
+    if x.ndim==5 and x.shape[0]==1: x = x[0]
+    if x.ndim!=4: raise ValueError(f"Expected (C,T,V,M) or (1,C,T,V,M), got {x.shape}")
+    return x.astype(np.float32, copy=False)
+
+# --- 스캔 & 계획 수립 ---
+SRC_DATA = Path(SRC_DATA); SRC_LABEL = Path(SRC_LABEL) if SRC_LABEL else None
+DST_DATA = Path(DST_DATA);  DST_LABEL = Path(DST_LABEL)
+DST_DATA.mkdir(parents=True, exist_ok=True); DST_LABEL.mkdir(parents=True, exist_ok=True)
+
+files = sorted(SRC_DATA.glob(PATTERN))
+print("소스 파일 수:", len(files))
+before = Counter()
+by_class_files = defaultdict(list)
+missing = []
+for p in files:
+    try:
+        y = get_label(p, SRC_LABEL)
+        before[y]+=1
+        by_class_files[y].append(p)
+    except Exception as e:
+        missing.append((p.name, str(e)))
+
+print("현재 분포:", dict(before))
+if missing:
+    print("라벨 못 읽은 파일 수:", len(missing), "예시:", missing[:3])
+
+plan_need = {c: max(0, BALANCE_TO - before.get(c,0)) for c in before.keys()|set(range(6))}
+print("생성 계획(클래스: 필요한 개수):", plan_need)
+
+# --- 생성 ---
+def next_aug_name(base: str, out_dir: Path):
+    base = base.replace("_data_joint","")
+    k = 0
+    while True:
+        cand = f"{base}_aug{k:02d}"
+        if not (out_dir / f"{cand}.npy").exists():
+            return cand
+        k += 1
+
+created = Counter()
+for c, need in plan_need.items():
+    if need <= 0: continue
+    src_list = by_class_files.get(c, [])
+    if not src_list:
+        print(f"[경고] 클래스 {c} 소스 없음 -> 건너뜀")
+        continue
+    pbar = tqdm(total=need, desc=f"class {c} -> {need}", leave=False)
+    i = 0
+    while created[c] < need:
+        p = src_list[i % len(src_list)]
+        x = ensure_ctvm(np.load(p))
+        xa = strong_augment(x, out_T=300)
+        base = next_aug_name(p.stem, DST_DATA)
+        np.save(DST_DATA / f"{base}.npy", xa)
+        with open(DST_LABEL / f"{base}.pkl", "wb") as f:
+            pickle.dump({"label_index":[int(c)]}, f)
+        created[c] += 1
+        i += 1
+        pbar.update(1)
+    pbar.close()
+
+print("생성 완료 per class:", dict(created))
+print("총 생성:", sum(created.values()))
+
+# 생성 후 간단 확인
+import os
+n_npy = len([1 for n in os.listdir(DST_DATA) if n.endswith(".npy")])
+n_pkl = len([1 for n in os.listdir(DST_LABEL) if n.endswith(".pkl")])
+print("생성된 NPY:", n_npy, " | PKL:", n_pkl)
+
+
+--- cell 22 code ---
+# joint 파일 이동
+!rsync -av --remove-source-files \
+  "/content/drive/MyDrive/Toyproject2/fine-tuning-2/train_bal1/joint/" \
+  "/content/drive/MyDrive/Toyproject2/fine-tuning-2/train/joint/"
+
+# label 파일 이동
+!rsync -av --remove-source-files \
+  "/content/drive/MyDrive/Toyproject2/fine-tuning-2/train_bal1/label/" \
+  "/content/drive/MyDrive/Toyproject2/fine-tuning-2/train/label/"
+
+# 소스 폴더가 비었으면 정리
+!find "/content/drive/MyDrive/Toyproject2/fine-tuning-2/train_bal1/joint" -type d -empty -delete
+!find "/content/drive/MyDrive/Toyproject2/fine-tuning-2/train_bal1/label" -type d -empty -delete
+
+
+--- cell 23 code ---
+# 폴더 전체(하위폴더 포함) .npy 개수
+!find "/content/drive/MyDrive/fine-tuning-1/train/bone" -type f -name "*.npy" | wc -l
+
+
+--- cell 25 code ---
+!find "/content/drive/MyDrive/fine-tuning/test/label" -type f -name "*.npy" | wc -l
+
+--- cell 26 code ---
+!find "/content/drive/MyDrive/fine-tuning/train/label" -type f -name "*.pkl" | wc -l
+
+--- cell 30 code ---
+# NTU xsub: joint → bone (train)
+!python folder_bone_generator.py \
+  --dataset "ntu/xsub" \
+  --in_dir "/content/drive/MyDrive/fine-tuning-1/train/joint" \
+  --out_dir "/content/drive/MyDrive/fine-tuning-1/train/bone"
+
+# NTU xsub: joint → bone (test)
+!python folder_bone_generator.py \
+  --dataset "ntu/xsub" \
+  --in_dir "/content/drive/MyDrive/fine-tuning-1/test/joint" \
+  --out_dir "/content/drive/MyDrive/fine-tuning-1/test/bone"
+
+
+--- cell 32 code ---
+!python -u "/content/drive/MyDrive/motion seungok/2s-AGCN-0.0/train_full_backbone_fc_finetune.patched.patched2.py" \
+  --config "/content/drive/MyDrive/motion seungok/yaml/train_born.yaml" \
+  --use_folder_feeder 1 \
+  --data_dir  "/content/drive/MyDrive/motion seungok/dataset/final_dataset_new/train/bone" \
+  --pattern   "*_bone.npy" \
+  --label_from sidecar \
+  --label_dir "/content/drive/MyDrive/motion seungok/dataset/final_dataset_new/train/label" \
+  --folder_window_size 300 \
+  --device cuda \
+  --k_folds 1 \
+  --single_split_train_ratio 0.85 \
+  --early_metric acc --patience 7 --num_epoch 20 \
+  --save_acc_lower 0.80 --save_acc_upper 0.98 \
+  --save_dir  "/content/drive/MyDrive/motion seungok/runs/bone_only" \
+  --apply_other_gate 0 \
+  --tb_logdir "/content/drive/MyDrive/motion seungok/tb_logs/bone_only" \
+  --model_py "/content/drive/MyDrive/motion seungok/2s-AGCN-0.0/model/agcn.py" \
+  --model_class "Model" \
+  --model_kwargs '{"num_class": 6, "in_channels": 3, "num_point": 25, "num_person": 2, "graph": "graph.ntu_rgb_d.Graph", "graph_args": {"labeling_mode": "spatial"}}' \
+  --base_ckpt "/content/drive/MyDrive/motion seungok/ntu_cs_agcn_bone-49-31300.pt" \
+  --ft_train_prefixes "fc.,classifier.,head."
+
+
+--- cell 35 code ---
+!python make_bone_label.py \
+  --label_root "/content/drive/MyDrive/fine-tuning/test/label" \
+  --bone_root  "/content/drive/MyDrive/fine-tuning/test/bone" \
+  --joint_root "/content/drive/MyDrive/fine-tuning/test/joint" \
+  --overwrite 0 \
+  --dry_run 0
+
+
+--- cell 36 code ---
+!python train_full_backbone_fc_finetune.patched.patched2.py \
+  --config "/content/drive/MyDrive/Toyproject2/yaml/train_nomerge_new.yaml" \
+  --use_folder_feeder 1 \
+  --data_dir  "/content/drive/MyDrive/Toyproject2/fine-tuning-2/train/ctvm" \
+  --label_dir "/content/drive/MyDrive/Toyproject2/fine-tuning-2/train/label" \
+  --pattern "*.npy" \
+  --label_from sidecar \
+  --folder_window_size 300 \
+  --device cuda \
+  --k_folds 1 \
+  --single_split_train_ratio 0.7 \
+  --early_metric acc \
+  --patience 15 \
+  --min_delta 0.0 \
+  --num_epoch 40\
+  --save_acc_lower 0.80 \
+  --save_acc_upper 0.98 \
+  --save_dir "/content/drive/MyDrive/Toyproject2/fine-tuning_outdir/0926-1" \
+  --apply_other_gate 0 \
+  --tb_logdir "/content/drive/MyDrive/Toyproject2/fine-tuning_outdir/0926-1/tb_logs" \
+  --model_py "/content/drive/MyDrive/Toyproject2/2s-AGCN-0.0/model/agcn.py" \
+  --model_class "Model" \
+  --model_kwargs '{"num_class": 6, "in_channels": 3, "num_point": 25, "num_person": 2, "graph": "graph.ntu_rgb_d.Graph", "graph_args": {"labeling_mode": "spatial"}}' \
+  --base_ckpt "/content/drive/MyDrive/Toyproject2/2s-AGCN-0.0/model/ntu_cs_agcn_joint-49-31300.pt" \
+  --ft_train_prefixes "fc.,classifier.,head."
+
+--- cell 37 code ---
+!python train_full_backbone_fc_finetune.patched.patched2.py \
+  --config "/content/drive/MyDrive/yaml/train_born.yaml" \
+  --use_folder_feeder 1 \
+  --data_dir  "/content/drive/MyDrive/fine-tuning/train/bone" \
+  --label_dir "/content/drive/MyDrive/fine-tuning/train/label" \
+  --pattern "*.npy" \
+  --label_from sidecar \
+  --folder_window_size 300 \
+  --device cuda \
+  --k_folds 1 \
+  --single_split_train_ratio 0.85 \
+  --early_metric acc \
+  --patience 15 \
+  --min_delta 0.0 \c:\Users\Playdata\Downloads\make_bone_label.py
+  --num_epoch 35 \
+  --save_acc_lower 0.80 \
+  --save_acc_upper 0.98 \
+  --save_dir "/content/drive/MyDrive/fine-tuning_outdir/agcn_bone/0925-1" \
+  --apply_other_gate 0 \
+  --tb_logdir "/content/drive/MyDrive/fine-tuning_outdir/agcn_bone/0925-1/tb_logs" \
+  --model_py "/content/drive/MyDrive/2s-AGCN-0.0/model/agcn.py" \
+  --model_class "Model" \
+  --model_kwargs '{"num_class": 6, "in_channels": 3, "num_point": 25, "num_person": 2, "graph": "graph.ntu_rgb_d.Graph", "graph_args": {"labeling_mode": "spatial"}}' \
+  --base_ckpt "/content/drive/MyDrive/2s-AGCN-0.0/model/ntu_cs_agcn_bone-49-31300.pt" \
+  --ft_train_prefixes "fc.,classifier.,head."
+
+
+--- cell 38 code ---
+!python train_full_backbone_fc_finetune.patched.patched2.py \
+  --config "/content/drive/MyDrive/Toyproject2/yaml/train_nomerge_new.yaml" \
+  --use_folder_feeder 1 \
+  --data_dir  "/content/drive/MyDrive/Toyproject2/fine-tuning-2/train/ctvm" \
+  --label_dir "/content/drive/MyDrive/Toyproject2/fine-tuning-2/train/label" \
+  --pattern "*.npy" \
+  --label_from sidecar \
+  --folder_window_size 300 \
+  --device cuda \
+  --k_folds 1 \
+  --single_split_train_ratio 0.7 \
+  --early_metric acc \
+  --patience 15 \
+  --min_delta 0.0 \
+  --num_epoch 40\
+  --save_acc_lower 0.80 \
+  --save_acc_upper 0.98 \
+  --save_dir "/content/drive/MyDrive/Toyproject2/fine-tuning_outdir/0926-1" \
+  --apply_other_gate 0 \
+  --tb_logdir "/content/drive/MyDrive/Toyproject2/fine-tuning_outdir/0926-1/tb_logs" \
+  --model_py "/content/drive/MyDrive/Toyproject2/2s-AGCN-0.0/model/agcn.py" \
+  --model_class "Model" \
+  --model_kwargs '{"num_class": 6, "in_channels": 3, "num_point": 25, "num_person": 2, "graph": "graph.ntu_rgb_d.Graph", "graph_args": {"labeling_mode": "spatial"}}' \
+  --base_ckpt "/content/drive/MyDrive/Toyproject2/2s-AGCN-0.0/model/ntu_cs_agcn_joint-49-31300.pt" \
+  --ft_train_prefixes "fc.,classifier.,head.
+
+--- cell 39 code ---
+!python -u train_full_backbone_fc_finetune_plus_head_calib.py \
+ --config "/content/drive/MyDrive/Toyproject2/yaml/train_nomerge_new.yaml" \
+  --use_folder_feeder 1 \
+  --data_dir  "/content/drive/MyDrive/Toyproject2/fine-tuning-1/train/train_ctvm" \
+  --label_dir "/content/drive/MyDrive/Toyproject2/fine-tuning-1/train/label" \
+  --pattern "*.npy" \
+  --folder_window_size 300 \
+  --device cuda \
+  --k_folds 1 \
+  --single_split_train_ratio 0.7 \
+  --early_metric f1 \
+  --patience 15 \
+  --num_epoch 40 \
+  --save_acc_lower 0.80 \
+  --save_acc_upper 0.98 \
+  --save_dir "/content/drive/MyDrive/Toyproject2/fine-tuning_outdir/0926-4" \
+  --tb_logdir "/content/drive/MyDrive/Toyproject2/fine-tuning_outdir/0926-4/tb_logs" \
+  --model_py "/content/drive/MyDrive/Toyproject2/2s-AGCN-0.0/model/agcn.py" \
+  --model_class "Model" \
+  --model_kwargs '{"num_class": 6, "in_channels": 3, "num_point": 25, "num_person": 2, "graph": "graph.ntu_rgb_d.Graph", "graph_args": {"labeling_mode": "spatial"}}' \
+  --base_ckpt "/content/drive/MyDrive/Toyproject2/2s-AGCN-0.0/model/ntu_cs_agcn_joint-49-31300.pt" \
+  --ft_train_prefixes "fc.,classifier.,head." \
+  --head_type cosine --cos_s 30 --cos_margin 0.05 \
+  --per_class_margin "0,0,0.12,0.12,0.04,0.04" \
+  --head_only_epochs 5 \
+  --use_weighted_sampler 0 \
+  --label_smoothing 0.05 \
+  --use_focal 0 \
+  --calibrate_bias 1 --calib_max_abs 2.0 --calib_step 0.1 --calib_rounds 2
+
+
+--- cell 41 code ---
+!python -u "eval_full_model_recursive3.py" \
+  --model_py "/content/drive/MyDrive/Toyproject2/2s-AGCN-0.0/model/agcn.py" \
+  --model_class "Model" \
+  --model_kwargs '{"num_class": 6, "in_channels": 3, "num_point": 25, "num_person": 2, "graph": "graph.ntu_rgb_d.Graph", "graph_args":{"labeling_mode":"spatial"}}' \
+  --ckpt "/content/drive/MyDrive/Toyproject2/fine-tuning_outdir/0926-4/best.pt" \
+  --data_dir  "/content/drive/MyDrive/Toyproject2/fine-tuning-1/test/test_ctvm" \
+  --label_dir "/content/drive/MyDrive/Toyproject2/fine-tuning-1/test/label" \
+  --pattern "*.npy" \
+  --window_T 300 \
+  --num_classes 6 \
+  --batch_size 32 \
+  --device cuda \
+  --tb_logdir "/content/drive/MyDrive/Toyproject2/fine-tuning_outdir/test/0926-4" \
+  --out_dir "/content/drive/MyDrive/Toyproject2/fine-tuning_outdir/test/0926-4" \
+  --apply_other_gate 0
+  --print
+
+
+--- cell 42 code ---
+/content/drive/MyDrive/Toyproject2/2s-AGCN-0.0/eval_full_model_recursive_3_patched_with_scores.py
+
+--- cell 44 code ---
+!python -u "eval_full_model_recursive_3_patched_with_scores.py" \
+  --model_py "/content/drive/MyDrive/Toyproject2/2s-AGCN-0.0/model/agcn.py" \
+  --model_class "Model" \
+  --model_kwargs '{"num_class": 6, "in_channels": 3, "num_point": 25, "num_person": 2, "graph": "graph.ntu_rgb_d.Graph", "graph_args":{"labeling_mode":"spatial"}}' \
+  --ckpt "/content/drive/MyDrive/Toyproject2/fine-tuning_outdir/0926-4/best.pt" \
+  --data_dir "/content/drive/MyDrive/Toyproject2/fine-tuning-1/test/test_ctvm" \
+  --label_dir "/content/drive/MyDrive/Toyproject2/fine-tuning-1/test/label" \
+  --pattern "*.npy" \
+  --window_T 300 \
+  --num_classes 6 \
+  --batch_size 32 \
+  --device cuda \
+  --tb_logdir "/content/drive/MyDrive/Toyproject2/fine-tuning_outdir/test/0926-4" \
+  --out_dir "/content/drive/MyDrive/Toyproject2/fine-tuning_outdir/test/0926-4" \
+  --apply_other_gate 0 \
+  --print_scores 0 \
+  --dump_scores "" \
+  --debug_list 20
+
+
+--- cell 45 code ---
+!python -u "eval_full_model_recursive3.py" \
+  --model_py "/content/drive/MyDrive/Toyproject2/2s-AGCN-0.0/model/agcn.py" \
+  --model_class "Model" \
+  --model_kwargs '{"num_class": 6, "in_channels": 3, "num_point": 25, "num_person": 2, "graph": "graph.ntu_rgb_d.Graph", "graph_args":{"labeling_mode":"spatial"}}' \
+  --ckpt "/content/drive/MyDrive/Toyproject2/fine-tuning_outdir/0926-4/best.pt" \
+  --data_dir  "/content/drive/MyDrive/Toyproject2/fine-tuning-1/test/test_ctvm" \
+  --label_dir "/content/drive/MyDrive/Toyproject2/fine-tuning-1/test/label" \
+  --pattern "*.npy" \
+  --window_T 300 \
+  --num_classes 6 \
+  --batch_size 32 \
+  --device cuda \
+  --tb_logdir "/content/drive/MyDrive/Toyproject2/fine-tuning_outdir/test/0926-4" \
+  --out_dir "/content/drive/MyDrive/Toyproject2/fine-tuning_outdir/test/0926-4" \
+  --apply_other_gate 0 \
+  --print_scores 1 \
+  --dump_scores "/content/drive/MyDrive/Toyproject2/fine-tuning_outdir/test/0926-4/per_sample_scores.csv" \
+  --score_precision 4 \
+  --debug_list 20
+
+--- cell 49 code ---
+# ==========================
+# MP4 -> NTU .skeleton writer (with FPS/T window control)
+# ==========================
+#!pip install mediapipe opencv-python tqdm
+
+import os, cv2, math, numpy as np
+from pathlib import Path
+from tqdm import tqdm
+import mediapipe as mp
+
+# --------- 사용자 설정 ---------
+ROOT_VIDEOS  = "/content/drive/MyDrive/single_npy"     # 클래스/영상.mp4 구조 권장
+OUT_SKELETON = "/content/drive/MyDrive/single_npy/skeleton"      # .skeleton 저장 폴더
+os.makedirs(OUT_SKELETON, exist_ok=True)
+
+# 파일명 메타 기본값(원본 NTU 네이밍 형식: S###C###P###R###A###.skeleton)
+DEFAULT_SETUP   = 1   # S
+DEFAULT_CAMERA  = 2   # C (xview에서 2,3 카메라가 train에 들어감)
+DEFAULT_SUBJECT = 1   # P
+DEFAULT_REPEAT  = 1   # R
+
+# 감지/프레임 설정
+VIS_THRES  = 0.5
+MAX_FRAMES = None        # None이면 전체, 숫자면 그만큼만(디버그)
+
+# --------- 추가: 타깃 FPS / 길이 / 인원 ---------
+TARGET_FPS = 30          # NEW: NTU는 30fps 기준. 원본 fps 상관없이 이 기준으로 근사 리샘플
+TARGET_T   = 300         # NEW: 최종 프레임 길이(윈도우) 고정. 실시간/파인튜닝이면 30~60 권장
+MAX_PERSON = 1           # NEW: 최대 인원. (MediaPipe Pose는 1인이라 현재 0/1만 나옴)
+
+# --------- MediaPipe → NTU25 매핑 ---------
+def mp_to_ntu25(landmarks):
+    """ landmarks: list of 33 normalized (x,y,visibility) in [0,1]
+        return (25,3) with [x,y,score] in [0,1]
+    """
+    def get(i):
+        lm = landmarks[i]
+        return np.array([lm.x, lm.y, getattr(lm, "visibility", 1.0)], dtype=np.float32)
+    def mid(a,b): return (a+b)/2.0
+
+    # key indices
+    LSH, RSH = get(11), get(12)
+    LHP, RHP = get(23), get(24)
+    L_EL, R_EL = get(13), get(14)
+    L_WR, R_WR = get(15), get(16)
+    L_ID, R_ID = get(19), get(20)
+    L_TB, R_TB = get(21), get(22)
+    L_KN, R_KN = get(25), get(26)
+    L_AN, R_AN = get(27), get(28)
+    L_FI, R_FI = get(31), get(32)
+    SHO = mid(LSH, RSH)  # spine shoulder
+    HIP = mid(LHP, RHP)  # spine base
+    NEK = SHO            # neck approx
+    HED = get(0)         # head ~ nose
+
+    J = np.stack([
+        HIP,           # 0 spine base
+        (HIP+SHO)/2.0, # 1 spine mid (approx)
+        NEK,           # 2 neck
+        HED,           # 3 head
+        LSH, L_EL, L_WR, L_ID,       # 4..7
+        RSH, R_EL, R_WR, R_ID,       # 8..11
+        LHP, L_KN, L_AN, L_FI,       # 12..15
+        RHP, R_KN, R_AN, R_FI,       # 16..19
+        SHO, L_ID, L_TB, R_ID, R_TB  # 20..24
+    ], axis=0).astype(np.float32)
+
+    J[:, :2] = np.clip(J[:, :2], 0.0, 1.0)
+    J[:, 2]  = np.clip(J[:, 2], 0.0, 1.0)  # score
+    return J  # (25,3)
+
+# --------- .skeleton 파일 작성기 ---------
+def write_ntu_skeleton(out_path, frames_joint):
+    """
+    frames_joint: list of dict per frame:
+      - if no body: {'numBody': 0}
+      - if body:    {'numBody': 1, 'J': (25,3) normalized}
+    Writes NTU skeleton text format compatible with read_skeleton_filter.
+    """
+    with open(out_path, "w") as f:
+        f.write(f"{len(frames_joint)}\n")  # numFrame
+        for fr in frames_joint:
+            nbody = min(fr.get("numBody", 0), MAX_PERSON)   # NEW: MAX_PERSON 적용
+            f.write(f"{nbody}\n")
+            if nbody == 0:
+                continue
+            # ---- bodyInfo 10 fields
+            bodyID = 1; clipedEdges=0; hLC=1; hLS=2; hRC=1; hRS=2; isR=0; leanX=0; leanY=0; tS=2
+            f.write(f"{bodyID} {clipedEdges} {hLC} {hLS} {hRC} {hRS} {isR} {leanX} {leanY} {tS}\n")
+            # ---- numJoint
+            f.write("25\n")
+            J = fr["J"]  # (25,3)
+            for j in range(25):
+                x, y, score = float(J[j,0]), float(J[j,1]), float(J[j,2])
+                z = 0.0
+                depthX, depthY = x, y
+                colorX, colorY = x, y
+                oW, oX, oY, oZ = 1.0, 0.0, 0.0, 0.0
+                tState = 2.0 if score >= VIS_THRES else 1.0
+                f.write(f"{x} {y} {z} {depthX} {depthY} {colorX} {colorY} {oW} {oX} {oY} {oZ} {tState}\n")
+
+# --------- FPS 리샘플/길이 맞춤 유틸 ---------
+def resample_by_fps(frames, src_fps, dst_fps):
+    """원본 프레임 리스트를 dst_fps에 맞게 인덱스 리샘플"""
+    if src_fps is None or src_fps <= 0:  # CHANGED: fps 불명 시 그대로
+        return frames
+    n = len(frames)
+    if n == 0: return frames
+    dur = n / float(src_fps)
+    n_dst = max(1, int(round(dur * float(dst_fps))))
+    idx = np.linspace(0, n-1, num=n_dst).round().astype(int)
+    idx = np.clip(idx, 0, n-1)
+    return [frames[i] for i in idx]
+
+def fit_to_length(frames, T):
+    """길이가 T가 되도록 잘라내기/보간/패딩(0-body)"""
+    n = len(frames)
+    if n == 0:
+        return [{"numBody": 0} for _ in range(T)]
+    if n == T:
+        return frames
+    if n > T:
+        # 균등 샘플링으로 T개 선택
+        idx = np.linspace(0, n-1, num=T).round().astype(int)
+        return [frames[i] for i in idx]
+    # pad 0-body
+    pad = [{"numBody": 0} for _ in range(T - n)]
+    return frames + pad
+
+# --------- 비디오 -> frames_joint ---------
+mp_pose = mp.solutions.pose
+
+def video_to_skeleton_frames(video_path):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return [], None  # CHANGED: fps도 반환
+
+    src_fps = cap.get(cv2.CAP_PROP_FPS) or 0.0  # CHANGED
+    frames = []
+    with mp_pose.Pose(static_image_mode=False, model_complexity=1,
+                      enable_segmentation=False,
+                      min_detection_confidence=0.5,
+                      min_tracking_confidence=0.5) as pose:
+        n = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok: break
+            n += 1
+            if MAX_FRAMES and n > MAX_FRAMES: break
+
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            res = pose.process(rgb)
+
+            if res.pose_landmarks:
+                J = mp_to_ntu25(res.pose_landmarks.landmark)  # (25,3)
+                mean_vis = float(J[:,2].mean())
+                if mean_vis >= 0.05:
+                    frames.append({"numBody": 1, "J": J})
+                else:
+                    frames.append({"numBody": 0})
+            else:
+                frames.append({"numBody": 0})
+    cap.release()
+    return frames, float(src_fps)
+
+# --------- 클래스→AID 매핑 만들기 ---------
+video_paths = sorted([p for p in Path(ROOT_VIDEOS).rglob("*.mp4")])
+if not video_paths:
+    raise SystemExit(f"No mp4 files under {ROOT_VIDEOS}")
+
+classes = sorted({p.parent.name for p in video_paths})
+cls2aid = {c:i+1 for i,c in enumerate(classes)}  # 1..K
+print("Class -> AID mapping:", cls2aid)
+
+# --------- 변환 실행 ---------
+for vpath in tqdm(video_paths, desc="Converting"):
+    cls = vpath.parent.name
+    A = cls2aid[cls]           # action id 1..K
+    S = DEFAULT_SETUP
+    C = DEFAULT_CAMERA
+    P = DEFAULT_SUBJECT
+    R = DEFAULT_REPEAT
+
+    base = vpath.stem
+    out_name = f"S{S:03d}C{C:03d}P{P:03d}R{R:03d}A{A:03d}_{base}.skeleton"
+    out_path = str(Path(OUT_SKELETON)/out_name)
+
+    frames, src_fps = video_to_skeleton_frames(str(vpath))
+    if len(frames) == 0:
+        # 빈 프레임이면 numFrame=0 파일 생성 (원하면 skip로 바꿔도 됨)
+        with open(out_path, "w") as f: f.write("0\n")
+        continue
+
+    # NEW: 타깃 FPS로 리샘플 → 타깃 길이(TARGET_T)로 맞춤
+    frames = resample_by_fps(frames, src_fps, TARGET_FPS)
+    frames = fit_to_length(frames, TARGET_T)
+
+    write_ntu_skeleton(out_path, frames)
+
+print(f"Done. Saved .skeleton files to: {OUT_SKELETON}")
+print("샘플 파일 예시:", sorted(os.listdir(OUT_SKELETON))[:5])
+
+
+--- cell 52 code ---
+!python -m data_gen.gen_ntu_batch \
+  --input "/content/drive/MyDrive/ToyProject/predict/*" \
+  --out_dir "/content/drive/MyDrive/ToyProject/predict/npy_data" \
+  --label_mode fixed \
+  --label 0 \
+  --save_label_per_file \
+  --aggregate_label "/content/drive/MyDrive/ToyProject/predict/npy_data/all_labels.pkl"
+
+
+--- cell 57 code ---
+안정적·일반화 우선
+
+Ep.021 (train≈0.76, valid≈0.85, gap≈0.09)
+
+Ep.030 (train≈0.79, valid≈0.82, gap≈0.03 → 거의 완벽 밸런스)
+
+최대 성능 추구
+
+Ep.034 (valid≈0.92, gap≈0.10)
+
+Ep.037 (valid≈0.95, gap≈0.13, 최고치지만 과적합 위험)
+
+--- cell 58 code ---
+!python predict_single_npy_leftpad2.py \
+  --model_py "/content/drive/MyDrive/Toyproject2/2s-AGCN-0.0/model/agcn.py" \
+  --model_class "Model" \
+  --model_kwargs '{"num_class":6,"in_channels":3,"num_point":25,"num_person":2,"graph":"graph.ntu_rgb_d.Graph","graph_args":{"labeling_mode":"spatial"}}' \
+  --ckpt "/content/drive/MyDrive/Toyproject2/fine-tuning_outdir/0926-3/best.pt" \
+  --npy  "/content/drive/MyDrive/Toyproject2/single_npy/npy/ctvm/S001C002P001R001A001_test5_squat_data_joint.npy" \
+  --device cpu \
+  --window_T 300 \
+  --num_classes 6 \
+  --do_norm 0 \
+  --modality 0 \
+  --print_all 1
+
+
+--- cell 59 code ---
+!python predict_single_npy_centerpad.py \
+  --model_py "/content/drive/MyDrive/2s-AGCN-0.0/model/agcn.py" \
+  --model_class "Model" \
+  --model_kwargs '{"num_class":6,"in_channels":3,"num_point":25,"num_person":2,"graph":"graph.ntu_rgb_d.Graph","graph_args":{"labeling_mode":"spatial"}}' \
+  --ckpt "/content/drive/MyDrive/fine-tuning_outdir/agcn_bone/0925-1/best.pt" \
+  --npy  "/content/drive/MyDrive/single_npy/npy/bone/S001C002P001R001A001_test5_squat_data_joint_bone.npy" \
+  --device cpu \
+  --window_T 300 \
+  --num_classes 6 \
+  --do_norm 0 \
+  --modality 1 \
+  --print_all 1
+
+--- cell 60 code ---
+!python predict_single_npy_centerpad_ensemble2.py \
+ --model_py "/content/drive/MyDrive/2s-AGCN-0.0/model/agcn.py" \
+  --model_class "Model" \
+  --model_kwargs '{"num_class":6,"in_channels":3,"num_point":25,"num_person":2,"graph":"graph.ntu_rgb_d.Graph","graph_args":{"labeling_mode":"spatial"}}' \
+  --ckpt "/content/drive/MyDrive/fine-tuning_outdir/0924-3/best.pt" \
+  --npy  "/content/drive/MyDrive/single_npy/npy/S001C002P001R001A001_test2_side_lateral_raise_data_joint.npy" \
+  --five_d_index 0 \
+  --ckpt2 "/content/drive/MyDrive/fine-tuning_outdir/agcn_bone/0925-1/best.pt" \
+  --npy2  "/content/drive/MyDrive/single_npy/npy/bone/S001C002P001R001A001_test2_side_lateral_raise_data_joint_bone.npy" \
+  --five_d_index2 1 \
+  --weight2 1.0 \
+  --device cpu --window_T 300 --do_norm 0 --print_all 1
+
+
+--- cell 64 code ---
+!python predict_single_npy_leftpad3.py \
+ --model_py "/content/drive/MyDrive/ToyProject/2s-AGCN-0.0/model/agcn.py" \
+  --model_class "Model" \
+  --npy  "/content/drive/MyDrive/Toyproject2/single_npy/npy/ctvm/S001C002P001R001A001_test4_lunges_data_joint.npy" \
+  --model_kwargs '{"num_class":6,"in_channels":3,"num_point":25,"num_person":2,"graph":"graph.ntu_rgb_d.Graph","graph_args":{"labeling_mode":"spatial"}}' \
+  --ckpt /content/drive/MyDrive/Toyproject2/fine-tuning_outdir/0926-4/best.pt \
+  --num_classes 6 \
+  --window_T 300 \
+   --device cpu
+
+--- cell 65 code ---
+!python -u "/content/drive/MyDrive/ToyProject/2s-AGCN-0.0/predict_single_npy.named.py" \
+  --model_py "/content/drive/MyDrive/ToyProject/2s-AGCN-0.0/model/agcn.py" \
+  --model_class "Model" \
+  --model_kwargs '{"num_class":6,"in_channels":3,"num_point":25,"num_person":2,"graph":"graph.ntu_rgb_d.Graph","graph_args":{"labeling_mode":"spatial"}}' \
+  --ckpt "/content/drive/MyDrive/ToyProject/fine-tuning_full_0922/best.pt" \
+  --npy  "/content/drive/MyDrive/ToyProject/predict/npy_data/S001C002P001R001A001_test6_benchpress_data_joint.npy" \
+  --window_T 300 --num_classes 6 --device cpu \
+  --apply_other_gate 1 --other_top1_min 0.80 --other_valid_first 1 --other_valid_last 5 \
+  --precision 6 --print_all 1 \
+  --save_json "/content/drive/MyDrive/ToyProject/pred_single.json"
+
+--- cell 66 code ---
+!python -u "/content/drive/MyDrive/ToyProject/2s-AGCN-0.0/predict_single_npy.named.py" \
+  --model_py "/content/drive/MyDrive/ToyProject/2s-AGCN-0.0/model/agcn.py" \
+  --model_class "Model" \
+  --model_kwargs '{"num_class":6,"in_channels":3,"num_point":25,"num_person":2,"graph":"graph.ntu_rgb_d.Graph","graph_args":{"labeling_mode":"spatial"}}' \
+  --ckpt "/content/drive/MyDrive/ToyProject/fine-tuning_full_0922/best.pt" \
+  --npy  "/content/drive/MyDrive/ToyProject/predict/npy_data/S001C002P001R001A001_test2_side_lateral_raise_data_joint.npy" \
+  --window_T 300 \
+  --num_classes 6 \
+  --device cpu \
+  --apply_other_gate 1 \
+  --other_top1_min 0.6 \
+  --other_valid_first 1 \
+  --other_valid_last 5 \
+  --print_topk 6 \
+  --save_json "/content/drive/MyDrive/ToyProject/pred_single.json"
+
+--- cell 67 code ---
+!python -u "/content/drive/MyDrive/ToyProject/2s-AGCN-0.0/predict_single_npy.safe.py" \
+  --model_py "/content/drive/MyDrive/ToyProject/2s-AGCN-0.0/model/agcn.py" \
+  --model_class "Model" \
+  --model_kwargs '{"num_class":6,"in_channels":3,"num_point":25,"num_person":2,"graph":"graph.ntu_rgb_d.Graph","graph_args":{"labeling_mode":"spatial"}}' \
+  --ckpt "/content/drive/MyDrive/ToyProject/fine-tuning_full_0922/best.pt" \
+  --npy "/content/drive/MyDrive/ToyProject/predict/npy_data/S001C002P001R001A001_test3_deadlift_data_joint.npy" \
+  --window_T 300 --num_classes 6 --device cpu \
+  --apply_other_gate 1 --other_top1_min 0.80 --other_valid_first 1 --other_valid_last 5 \
+  --precision 6 --print_all 1 \
+  --save_json "/content/drive/MyDrive/ToyProject/pred_single.json"
+
+
+--- cell 68 code ---
+!python -u "/content/drive/MyDrive/ToyProject/2s-AGCN-0.0/predict_single_npy.safe.py" \
+  --model_py "/content/drive/MyDrive/ToyProject/2s-AGCN-0.0/model/agcn.py" \
+  --model_class "Model" \
+  --model_kwargs '{"num_class":6,"in_channels":3,"num_point":25,"num_person":2,"graph":"graph.ntu_rgb_d.Graph","graph_args":{"labeling_mode":"spatial"}}' \
+  --ckpt "/content/drive/MyDrive/ToyProject/fine-tuning_full_0922/best.pt" \
+  --npy "/content/drive/MyDrive/ToyProject/predict/npy_data/S001C002P001R001A001_test2_side_lateral_raise_data_joint.npy" \
+  --window_T 300 --num_classes 6 --device cpu \
+  --apply_other_gate 1 --other_top1_min 0.80 --other_valid_first 1 --other_valid_last 5 \
+  --precision 6 --print_all 1 \
+  --save_json "/content/drive/MyDrive/ToyProject/pred_single.json"
+
+
+--- cell 69 code ---
+!python -u "/content/drive/MyDrive/2s-AGCN-0.0/predict_single_npy.safe.py" \
+  --model_py "/content/drive/MyDrive/2s-AGCN-0.0/model/agcn.py" \
+  --model_class "Model" \
+  --model_kwargs '{"num_class":6,"in_channels":3,"num_point":25,"num_person":2,"graph":"graph.ntu_rgb_d.Graph","graph_args":{"labeling_mode":"spatial"}}' \
+  --ckpt "/content/drive/MyDrive/ToyProject/fine-tuning_full_0922/best.pt" \
+  --npy "/content/drive/MyDrive/ToyProject/predict/npy_data/S001C002P001R001A001_test5_squat_data_joint.npy" \
+  --window_T 300 --num_classes 6 --device cpu \
+  --apply_other_gate 1 --other_top1_min 0.80 --other_valid_first 1 --other_valid_last 5 \
+  --precision 6 --print_all 1 \
+  --save_json "/content/drive/MyDrive/ToyProject/pred_single.json"
+
+
+--- cell 70 code ---
+!python -u "/content/drive/MyDrive/ToyProject/2s-AGCN-0.0/predict_single_npy.safe.py" \
+  --model_py "/content/drive/MyDrive/ToyProject/2s-AGCN-0.0/model/agcn.py" \
+  --model_class "Model" \
+  --model_kwargs '{"num_class":6,"in_channels":3,"num_point":25,"num_person":2,"graph":"graph.ntu_rgb_d.Graph","graph_args":{"labeling_mode":"spatial"}}' \
+  --ckpt "/content/drive/MyDrive/fine-tuning_outdir/0924-3/best.pt" \
+  --npy "/content/drive/MyDrive/ToyProject/predict/npy_data/S001C002P001R001A001_test6_benchpress_data_joint.npy" \
+  --window_T 300 --num_classes 6 --device cpu \
+  --apply_other_gate 1 --other_top1_min 0.80 --other_valid_first 1 --other_valid_last 5 \
+  --precision 6 --print_all 1 \
+  --save_json "/content/drive/MyDrive/ToyProject/pred_single.json"

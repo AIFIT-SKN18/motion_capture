@@ -69,6 +69,67 @@
 - `yaml/test_joint.yaml`에 테스트 데이터 경로를 지정합니다.
 - 평가 결과는 `fine-tuning_outdir/` 등에 저장되며, 필요 시 `ensemble.py`로 joint/bone 스트림 앙상블이 가능합니다.
 
+## motion.ipynb 기반 학습/확률 처리 상세
+이 섹션은 `Toyproject-motionclassification/motion.ipynb`의 실행 흐름을 정리한 것입니다(Colab 경로 기반).
+
+### 1) 데이터 준비/전처리 (노트북)
+- **입력 구조**: 클래스/영상.mp4 폴더 구조를 가정합니다.
+- **MP4 → NTU .skeleton 변환**
+  - MediaPipe Pose로 프레임별 관절을 추출하고 NTU 25관절로 매핑합니다.
+  - 원본 FPS와 무관하게 **TARGET_FPS=30**으로 리샘플합니다.
+  - 길이는 **TARGET_T=300**으로 고정(길면 균등 샘플링, 짧으면 0-body 패딩)합니다.
+  - `.skeleton` 파일명은 NTU 형식(SxxxCxxxPxxxRxxxAxxx_*)으로 생성합니다.
+- **.skeleton → joint NPY**
+  - `data_gen.gen_ntu_batch`를 사용해 joint NPY로 변환합니다.
+  - 고정 라벨(`label_mode fixed`) 또는 파일별 라벨 저장 옵션을 사용합니다.
+- **중복 제거**
+  - NPY 파일 해시 비교로 중복을 찾아 제거합니다(플립 데이터는 우선적으로 제거 대상으로 분류).
+- **Train/Test 분리**
+  - **다중 클래스 stratified split**(예: 0.7/0.3)로 분할합니다.
+  - 라벨은 sidecar `.pkl` 또는 파일명 `_y{label}`을 우선 사용합니다.
+- **CTVM 정규화 및 M 보정**
+  - `ctvm_sanitize.py`로 `(C,T,V,M)` 형식을 정규화합니다.
+  - `FORCE_M=2`로 사람 수 차원을 보정합니다.
+- **Bone 데이터 생성**
+  - `folder_bone_generator.py`로 joint → bone 변환을 수행합니다.
+
+### 2) 학습 방법 (노트북 실행 커맨드 기반)
+- **파인튜닝 스크립트**
+  - `train_full_backbone_fc_finetune.patched.patched2.py` 또는
+    `train_full_backbone_fc_finetune_plus_head_calib.py` 사용.
+- **기본 설정**
+  - `num_class=6`, `num_point=25`, `num_person=2`
+  - `graph: graph.ntu_rgb_d.Graph` (spatial labeling)
+  - 입력 길이 `window_T=300`
+- **학습 전략**
+  - 사전학습 체크포인트(`ntu_cs_agcn_*`)에서 시작
+  - fine-tuning 대상 파라미터 prefix: `fc., classifier., head.`
+  - early stopping 사용 (metric: acc 또는 f1, patience 지정)
+  - label smoothing, cosine head, per-class margin, bias calibration 등을 상황에 따라 적용
+
+### 3) 확률/점수 처리 (노트북 실행 커맨드 기반)
+- **평가 스크립트**
+  - `eval_full_model_recursive3.py` 및 `eval_full_model_recursive_3_patched_with_scores.py`
+  - per-sample score CSV 덤프(`--dump_scores`) 지원
+- **단일 샘플 추론**
+  - `predict_single_npy_centerpad.py`, `predict_single_npy_leftpad*.py` 사용
+  - 출력은 클래스별 score(확률/점수)와 top-k를 출력하도록 구성
+- **기타 게이트 옵션**
+  - `apply_other_gate`, `other_top1_min`, `other_valid_first/last` 같은 옵션으로
+    **others 클래스 판정 게이트**를 추가 적용할 수 있도록 설계되어 있습니다.
+
+### 4) 확률 점수 계산 방식
+- **MS‑G3D TFLite 추론**(`evaluate_single_100frames.py`)
+  - 모델 출력은 logits이며, 아래처럼 **softmax**로 확률을 계산합니다.
+    - `prob = exp(logit) / sum(exp(logit))`
+  - 이 확률로 `argmax`를 취해 최종 클래스를 결정합니다.
+- **2s‑AGCN 노트북 추론**
+  - `predict_single_npy_*` 스크립트에서 클래스별 **score/확률**을 출력합니다.
+  - 필요 시 `eval_full_model_recursive_3_patched_with_scores.py`로 per-sample score를 CSV로 저장합니다.
+- **others gate (선택)**  
+  - `apply_other_gate=1`일 때, top-1 확률이 임계값(`other_top1_min`) 미만이면 **others로 보정**합니다.
+  - `other_valid_first/last`로 정상 클래스 범위를 제한해 **others 판정 조건**을 강화할 수 있습니다.
+
 ## 핵심 스크립트 설명
 - `Toyproject-motionclassification/mp4_preprocess.py`
   - MP4 → `(3,T,25,1)` NPY 변환
