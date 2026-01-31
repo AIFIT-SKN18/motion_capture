@@ -43,6 +43,56 @@
   - benchpress, deadlift, lunges, side_lateral_raise, squat, others
 - 여러 테스트 비디오에 대해 예측/정확도 로그를 출력합니다.
 
+## 데이터/전처리/학습 상세
+### 1) 어떤 데이터를 사용했는가
+- 입력 데이터는 **운동 동작 MP4 영상**이며, 단일 인물 기준으로 처리합니다.
+- 분류 클래스는 6개로 고정되어 있습니다:
+  - benchpress, deadlift, lunges, side_lateral_raise, squat, others
+- 학습/평가용 영상은 스크립트 내부의 `test_videos` 목록에 예시로 정의되어 있습니다.
+
+### 2) 전처리: MediaPipe Pose → NTU 25관절
+- `pose_extractor.py`에서 MediaPipe Pose의 33관절을 NTU RGB+D 25관절로 매핑합니다.
+- 관절 중앙(hip center, shoulder center)은 좌우 평균으로 계산합니다.
+- 포즈 인식 실패 프레임은 직전 프레임을 복사하고, 첫 프레임 실패 시 0으로 채웁니다.
+- 결과 스켈레톤 시퀀스 형태는 `(T, 25, 3)`입니다.
+
+### 3) 전처리: 100프레임 고정 길이
+- `evaluate_single_100frames.py`에서 **100프레임 고정 길이**를 사용합니다.
+- 길이가 길면 균등 샘플링으로 100프레임만 선택합니다.
+- 길이가 짧으면 edge padding으로 100프레임에 맞춥니다.
+- 모델 입력은 `(1, 100, 25, 1, 3)` 형태로 변환됩니다.
+
+### 4) 학습 설정(요약)
+- MS‑G3D 모델을 사용하며, 설정 값은 아래와 같습니다:
+  - `num_class: 6`, `num_point: 25`, `num_person: 1`
+  - `num_gcn_scales: 13`, `num_g3d_scales: 6`
+  - `graph: graph.ntu_rgb_d.AdjMatrixGraph`
+- 학습된 가중치는 `weights-9-837_100frame.pt`에 저장되어 있습니다.
+- 구체적인 학습 로그/노트는 `MS_G3D_Improved_100frame.ipynb`에 정리되어 있습니다.
+
+## 파일 변환(모델 변환) 상세
+### PyTorch → ONNX → TFLite 변환 흐름
+- `convert_to_tflite_100frames.py`가 전체 변환을 수행합니다.
+1) **PyTorch 가중치 로드**
+   - `weights-9-837_100frame.pt` 로드 후 `Model(**model_args)`에 적용
+2) **더미 입력으로 ONNX 내보내기**
+   - 입력 텐서: `(1, 3, 100, 25, 1)` (window_size=100)
+3) **ONNX 검증**
+   - `onnx.checker`로 구조 검증 후 ONNX Runtime으로 출력 비교
+4) **ONNX 단순화**
+   - `onnxsim.simplify`로 그래프 단순화
+5) **onnx2tf로 TFLite 변환**
+   - `python -m onnx2tf -i <onnx> -o <dir> -osd -dgc -nuo`
+
+### 변환 산출물
+- `tflite_simplified_float16.tflite`
+- `tflite_simplified_float32.tflite`
+- 스크립트에서 float32 모델은 `weights-100frames-float32.tflite`로 이름 변경합니다.
+
+### 변환 후 검증
+- `evaluate_single_100frames.py`로 TFLite 모델을 로드하고
+  테스트 MP4를 입력하여 softmax 확률/예측 라벨을 출력합니다.
+
 ## 환경/경로 주의사항
 현재 스크립트에는 **절대 경로**가 하드코딩되어 있습니다. 아래 경로는 환경에 맞게 수정이 필요합니다.
 - `convert_to_tflite_100frames.py`
